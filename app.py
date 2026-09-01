@@ -199,12 +199,12 @@ st.sidebar.markdown("---")
 st.sidebar.header("Economic Vitality Layers")
 with st.sidebar.expander("ℹ️ Understanding LEHD Data (WAC)", expanded=False):
     st.markdown("""
-    - **LEHD (Longitudinal Employer-Household Dynamics):** Tracks jobs *where people work* (workplace blocks), not where they live.
+    - **LEHD (Longitudinal Employer-Household Dynamics):** Tracks jobs where people work (workplace blocks), not where they live.
     - **Total Job Growth (All Wages):** Net change in all jobs combined (2016-2021). Good for broad economic activity, but can mask low-wage churn replacing high-wage jobs.
-    - **High-Wage Job Growth (>$40k/yr):** Isolates jobs earning >$3,333/month (`CE03` tier). True indicator of regional wealth creation and sustainable commercial health.
+    - **High-Wage Job Growth (Exceeding $40k/yr):** Isolates jobs earning greater than $3,333/month (CE03 tier). True indicator of regional wealth creation and sustainable commercial health.
     """)
 
-base_metric = st.sidebar.radio("Base Heatmap Metric (LEHD)", ["Total Job Growth (All Wages)", "High-Wage Job Growth (>$40k/yr)"])
+base_metric = st.sidebar.radio("Base Heatmap Metric (LEHD)", ["Total Job Growth (All Wages)", "High-Wage Job Growth (Exceeding $40k/yr)"])
 metric_col = 'job_growth' if base_metric == "Total Job Growth (All Wages)" else 'high_wage_growth'
 
 # Smart Defaults & Filtering based on Analysis Focus Mode with Layer Synchronization
@@ -257,7 +257,7 @@ with st.sidebar.expander("ℹ️ Complete Statutory & Algorithmic Makeup", expan
     st.markdown("""
     - **Severely Disadvantaged Zones (Crimson):** Tracts experiencing severe job hemorrhage (loss of 30+ jobs). Requires emergency structural intervention.
     - **High Opportunity Hubs (Neon Yellow):** Non-distressed tracts where high-wage expansion exceeds the regional 75th percentile. Framed for private investment scaling.
-    - **High-Risk / Caution Zones (Neon Red):** Distressed tracts experiencing net job decline (< -10 jobs). Flags structural headwinds where tax incentives alone historically fail.
+    - **High-Risk / Caution Zones (Neon Red):** Distressed tracts experiencing net job decline (less than -10 jobs). Flags structural headwinds where tax incentives alone historically fail.
     - **HUD QCT (Neon Blue):** Statutory low-income tracts (50%+ households under 60% AMGI or 25%+ poverty). Unlocks LIHTC 30% basis boosts.
     - **Opportunity Zones (Neon White):** Treasury-certified low-income communities designated for capital gains tax deferment benefits.
     """)
@@ -310,7 +310,7 @@ if not filtered_tracts.empty:
         },
         tooltip=folium.features.GeoJsonTooltip(
             fields=['GEOID', 'job_growth', 'high_wage_growth', 'Investment_Rating'],
-            aliases=['Census Tract ID:', 'Total Job Growth:', 'High-Wage Growth (>$40k):', 'Detailed Diagnostic Evaluation:'],
+            aliases=['Census Tract ID:', 'Total Job Growth:', 'High-Wage Growth (Exceeding $40k):', 'Detailed Diagnostic Evaluation:'],
             localize=True,
             sticky=True,
             style="background-color: white; color: #333333; font-family: arial; font-size: 12px; padding: 10px; max-width: 280px; word-wrap: break-word; white-space: normal; border-radius: 4px; box-shadow: 0 2px 5px rgba(0,0,0,0.3);"
