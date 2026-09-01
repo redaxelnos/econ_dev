@@ -195,14 +195,22 @@ analysis_mode = st.sidebar.radio(
     ]
 )
 
+st.sidebar.markdown("---")
+st.sidebar.header("Economic Vitality Layers")
+with st.sidebar.expander("ℹ️ Understanding LEHD Data (WAC)", expanded=False):
+    st.markdown("""
+    - **LEHD (Longitudinal Employer-Household Dynamics):** Tracks jobs *where people work* (workplace blocks), not where they live.
+    - **Total Job Growth (All Wages):** Net change in all jobs combined (2016-2021). Good for broad economic activity, but can mask low-wage churn replacing high-wage jobs.
+    - **High-Wage Job Growth (>$40k/yr):** Isolates jobs earning >$3,333/month (`CE03` tier). True indicator of regional wealth creation and sustainable commercial health.
+    """)
+
 base_metric = st.sidebar.radio("Base Heatmap Metric (LEHD)", ["Total Job Growth (All Wages)", "High-Wage Job Growth (>$40k/yr)"])
 metric_col = 'job_growth' if base_metric == "Total Job Growth (All Wages)" else 'high_wage_growth'
 
-# Smart Defaults & Filtering based on Analysis Focus Mode
+# Smart Defaults & Filtering based on Analysis Focus Mode with Layer Synchronization
 if analysis_mode == "⚠️ Severely Disadvantaged & High-Need Focus (Critical Intervention)":
     filtered_tracts = gdf_mapped[gdf_mapped['job_growth'] <= -30]
     st.sidebar.error("Showing *only* severely disadvantaged tracts experiencing severe job contraction (net loss of 30+ jobs).")
-    # Auto-sync boundary visibility to match objective
     default_high_opp = False
     default_high_risk = True
     default_qct = True
@@ -304,7 +312,8 @@ if not filtered_tracts.empty:
             fields=['GEOID', 'job_growth', 'high_wage_growth', 'Investment_Rating'],
             aliases=['Census Tract ID:', 'Total Job Growth:', 'High-Wage Growth (>$40k):', 'Detailed Diagnostic Evaluation:'],
             localize=True,
-            sticky=True
+            sticky=True,
+            style="background-color: white; color: #333333; font-family: arial; font-size: 12px; padding: 10px; max-width: 280px; word-wrap: break-word; white-space: normal; border-radius: 4px; box-shadow: 0 2px 5px rgba(0,0,0,0.3);"
         )
     ).add_to(m)
 
@@ -328,7 +337,7 @@ if show_high_opp and not gdf_high_opp.empty:
         tooltip=folium.features.GeoJsonTooltip(
             fields=['GEOID', 'Investment_Rating', 'high_wage_growth'],
             aliases=['Tract ID:', 'Classification:', 'High-Wage Net Gain:'],
-            style="background-color: white; color: #333333; font-family: arial; font-size: 13px; padding: 8px;"
+            style="background-color: white; color: #333333; font-family: arial; font-size: 12px; padding: 10px; max-width: 280px; word-wrap: break-word; white-space: normal;"
         )
     ).add_to(m)
 
@@ -347,7 +356,7 @@ if show_high_risk and not gdf_high_risk.empty:
         tooltip=folium.features.GeoJsonTooltip(
             fields=['GEOID', 'Investment_Rating', 'job_growth'],
             aliases=['Tract ID:', 'Risk Flag:', 'Net Job Loss:'],
-            style="background-color: white; color: #333333; font-family: arial; font-size: 13px; padding: 8px;"
+            style="background-color: white; color: #333333; font-family: arial; font-size: 12px; padding: 10px; max-width: 280px; word-wrap: break-word; white-space: normal;"
         )
     ).add_to(m)
 
@@ -366,7 +375,7 @@ if show_qct and not gdf_qct.empty:
         tooltip=folium.features.GeoJsonTooltip(
             fields=['GEOID', 'Designation', 'Strategic_Note'],
             aliases=['QCT Tract ID:', 'Boundary Type:', 'Policy Objective:'],
-            style="background-color: white; color: #333333; font-family: arial; font-size: 13px; padding: 8px;"
+            style="background-color: white; color: #333333; font-family: arial; font-size: 12px; padding: 10px; max-width: 280px; word-wrap: break-word; white-space: normal;"
         )
     ).add_to(m)
 
@@ -384,7 +393,7 @@ if show_oz and not gdf_oz.empty:
         tooltip=folium.features.GeoJsonTooltip(
             fields=['TRACT', 'Designation', 'Strategic_Note'],
             aliases=['OZ Tract ID:', 'Boundary Type:', 'Policy Objective:'],
-            style="background-color: white; color: #333333; font-family: arial; font-size: 13px; padding: 8px;"
+            style="background-color: white; color: #333333; font-family: arial; font-size: 12px; padding: 10px; max-width: 280px; word-wrap: break-word; white-space: normal;"
         )
     ).add_to(m)
 
