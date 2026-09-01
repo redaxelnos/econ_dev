@@ -87,7 +87,7 @@ def load_osm_data(city_name):
     except Exception:
         return gpd.GeoDataFrame()
 
-# 4 & 5. Federal Boundaries with Paginator to prevent record caps
+# 4 & 5. Federal Boundaries with Paginator
 @st.cache_data
 def load_federal_boundaries(layer_type):
     url = "https://services6.arcgis.com/zDzo4EZXf1AjkPjO/ArcGIS/rest/services/Qualified_Census_Tracts_2025/FeatureServer/0/query" if layer_type == "QCT" else "https://services.arcgis.com/VTyQ9soqVukalItT/arcgis/rest/services/Opportunity_Zones/FeatureServer/0/query"
@@ -159,7 +159,9 @@ def evaluate_investment_risk(row):
     job_str = f"Net job change: {int(growth):+d}"
     hw_str = f"High-Wage change: {int(high_wage):+d} (Threshold: +{int(high_wage_threshold)})"
     
-    if is_distressed:
+    if growth <= -30:
+        return f"⚠️ Severely Disadvantaged / Critical Contraction | {job_str} | {hw_str} (Severe Job Loss)."
+    elif is_distressed:
         if growth < -10:
             return f"🔴 High-Risk / Caution (Distressed + Decline) | {job_str} | {hw_str}."
         elif growth < 20:
@@ -178,6 +180,7 @@ gdf_mapped['Investment_Rating'] = gdf_mapped.apply(evaluate_investment_risk, axi
 
 gdf_high_opp = gdf_mapped[gdf_mapped['Investment_Rating'].str.contains("High Opportunity", na=False)].copy()
 gdf_high_risk = gdf_mapped[gdf_mapped['Investment_Rating'].str.contains("High-Risk", na=False)].copy()
+gdf_sev_disadv = gdf_mapped[gdf_mapped['Investment_Rating'].str.contains("Severely Disadvantaged", na=False)].copy()
 
 # --- SIDEBAR CONTROLS ---
 st.sidebar.markdown("---")
@@ -186,6 +189,7 @@ analysis_mode = st.sidebar.radio(
     "Select Map Objective",
     [
         "Full Spectrum View (All Tracts)", 
+        "⚠️ Severely Disadvantaged & High-Need Focus (Critical Intervention)",
         "🚨 Turnaround & Intervention Target Focus (Declining/Distressed Only)",
         "🌟 High-Growth Scaling Focus (Expansion Hubs Only)"
     ]
@@ -195,7 +199,10 @@ base_metric = st.sidebar.radio("Base Heatmap Metric (LEHD)", ["Total Job Growth 
 metric_col = 'job_growth' if base_metric == "Total Job Growth (All Wages)" else 'high_wage_growth'
 
 # Dynamic filtering based on Analysis Focus Mode
-if analysis_mode == "🚨 Turnaround & Intervention Target Focus (Declining/Distressed Only)":
+if analysis_mode == "⚠️ Severely Disadvantaged & High-Need Focus (Critical Intervention)":
+    filtered_tracts = gdf_mapped[gdf_mapped['job_growth'] <= -30]
+    st.sidebar.error("Showing *only* severely disadvantaged tracts experiencing severe job contraction (net loss of 30+ jobs).")
+elif analysis_mode == "🚨 Turnaround & Intervention Target Focus (Declining/Distressed Only)":
     filtered_tracts = gdf_mapped[
         (gdf_mapped[metric_col] < 20) & 
         (gdf_mapped['Investment_Rating'].str.contains("High-Risk|Distressed", na=False))
@@ -223,8 +230,9 @@ st.sidebar.markdown("---")
 st.sidebar.header("Policy & Opportunity Boundaries")
 with st.sidebar.expander("ℹ️ Complete Statutory & Algorithmic Makeup", expanded=False):
     st.markdown("""
+    - **Severely Disadvantaged Zones (Crimson):** Tracts experiencing severe job hemorrhage (loss of 30+ jobs). Requires emergency structural intervention.
     - **High Opportunity Hubs (Neon Yellow):** Non-distressed tracts where high-wage expansion exceeds the regional 75th percentile. Framed for private investment scaling.
-    - **High-Risk / Caution Zones (Neon Red):** Distressed tracts experiencing net job decline (< -10 jobs). Flags structural headwinds where tax incentives alone historically fail without upfront anchor investments.
+    - **High-Risk / Caution Zones (Neon Red):** Distressed tracts experiencing net job decline (< -10 jobs). Flags structural headwinds where tax incentives alone historically fail.
     - **HUD QCT (Neon Blue):** Statutory low-income tracts (50%+ households under 60% AMGI or 25%+ poverty). Unlocks LIHTC 30% basis boosts.
     - **Opportunity Zones (Neon White):** Treasury-certified low-income communities designated for capital gains tax deferment benefits.
     """)
@@ -255,15 +263,15 @@ else:
 # --- RENDER MAP ---
 m = folium.Map(location=region_coords, zoom_start=region_zoom, tiles="OpenStreetMap")
 
-# Layer 1: High-Contrast Percentile-Clamped Base Map
+# Layer 1: Absolute Global Percentile-Clamped Base Map (Ensures colors stay absolute across filters)
 if not filtered_tracts.empty:
-    p5, p95 = np.percentile(filtered_tracts[metric_col].dropna(), [5, 95])
-    vmin = min(p5, filtered_tracts[metric_col].min())
-    vmax = max(p95, filtered_tracts[metric_col].max())
+    global_p5, global_p95 = np.percentile(gdf_mapped[metric_col].dropna(), [5, 95])
+    vmin = min(global_p5, gdf_mapped[metric_col].min())
+    vmax = max(global_p95, gdf_mapped[metric_col].max())
     if vmin == vmax: vmax += 1
 
     colormap = cm.LinearColormap(colors=['#d73027', '#fee08b', '#1a9850'], vmin=vmin, vmax=vmax)
-    colormap.caption = f'Net Growth: {base_metric} (Clamped Range)'
+    colormap.caption = f'Net Growth: {base_metric} (Absolute Statewide Scale)'
     colormap.add_to(m)
 
     folium.GeoJson(
