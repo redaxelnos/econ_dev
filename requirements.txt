@@ -1,0 +1,6 @@
+streamlit==1.38.0
+pandas
+geopandas
+folium
+streamlit-folium
+osmnx
