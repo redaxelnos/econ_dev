@@ -7,12 +7,19 @@ import requests
 import io
 import numpy as np
 import branca.colormap as cm
+from shapely.geometry import Point
 from sklearn.neighbors import NearestNeighbors
 from folium.plugins import MarkerCluster, HeatMap
 from streamlit_folium import st_folium
 
 st.set_page_config(page_title="PA Economic Gap Analysis", layout="wide")
 st.title("Pennsylvania Economic & Infrastructure Gap Analysis")
+
+# --- SESSION STATE INITIALIZATION ---
+if "selected_geoid" not in st.session_state:
+    st.session_state.selected_geoid = "42003010300"  # Default Pittsburgh sample tract
+if "deployed_anchors" not in st.session_state:
+    st.session_state.deployed_anchors = {}  # Format: {geoid: [anchor_name_1, anchor_name_2]}
 
 # --- REGION SELECTOR CONFIGURATION ---
 REGIONS = {
@@ -54,7 +61,7 @@ def load_census_data():
     gdf_mapped['high_wage_growth'] = gdf_mapped['high_wage_growth'].fillna(0)
     gdf_mapped['C000_21'] = gdf_mapped['C000_21'].fillna(0)
     
-    # Synthetic Zillow-style baseline home value estimation based on wage density & total jobs ($150k to $450k range)
+    # Synthetic Zillow-style baseline home value estimation
     np.random.seed(42)
     gdf_mapped['baseline_home_value'] = 180000 + (gdf_mapped['high_wage_growth'] * 1200) + (gdf_mapped['C000_21'] * 45)
     gdf_mapped['baseline_home_value'] = gdf_mapped['baseline_home_value'].clip(lower=95000, upper=650000)
@@ -216,61 +223,34 @@ with st.sidebar.expander("ℹ️ Understanding LEHD Data (WAC)", expanded=False)
 base_metric = st.sidebar.radio("Base Heatmap Metric (LEHD)", ["Total Job Growth (All Wages)", "High-Wage Job Growth (Exceeding $40k/yr)"])
 metric_col = 'job_growth' if base_metric == "Total Job Growth (All Wages)" else 'high_wage_growth'
 
-# Simulation State Container for highlighting simulated tracts
-simulated_geoid = None
-
+# Simulation Controls with Sizing Tiers
 if analysis_mode == "🔮 Counterfactual Impact Simulation (What-If Modeling)":
-    st.sidebar.subheader("Dynamic Scenario Engine")
+    st.sidebar.subheader("🎯 Active Simulation Target")
+    st.sidebar.info(f"Selected Census Tract: **{st.session_state.selected_geoid}**\n*(Tip: Click any tract directly on the map to switch targets)*")
     
-    # Pick a sample tract or enter custom GEOID
-    sample_tracts = gdf_mapped['GEOID'].astype(str).tolist()
-    default_idx = sample_tracts.index("42003010300") if "42003010300" in sample_tracts else 0
-    target_geoid = st.sidebar.selectbox("Select Target Census Tract (GEOID)", options=sample_tracts[:500], index=default_idx)
-    simulated_geoid = str(target_geoid)
-    
-    anchor_action = st.sidebar.selectbox(
-        "Intervention Type",
-        [
-            "Add Major Fulfillment / Logistics Hub (e.g., Amazon)", 
-            "Add Medium-Size College / University", 
-            "Add Regional Hospital / Medical Center", 
-            "Add Anchor Supermarket / Retail Hub",
-            "Remove Existing Anchor (Negative Structural Shock)"
-        ]
+    anchor_type = st.sidebar.selectbox(
+        "Anchor Category",
+        ["Hospital / Medical Center", "Grocery Store / Supermarket", "College / University", "Fulfillment / Logistics Hub"]
     )
     
-    # Run scikit-learn NearestNeighbors Peer Matching
-    match_row = gdf_mapped[gdf_mapped['GEOID'].astype(str) == simulated_geoid]
-    if not match_row.empty:
-        base_jobs = match_row.iloc[0]['C000_21']
-        base_home_val = match_row.iloc[0]['baseline_home_value']
+    anchor_size = st.sidebar.selectbox(
+        "Scale & Size Tier",
+        ["Small / Community-Scale", "Medium / Regional-Scale", "Large / Enterprise Mega-Scale"]
+    )
+    
+    deployment_key = f"{anchor_size} {anchor_type}"
+    
+    col_deploy, col_clear = st.sidebar.columns(2)
+    if col_deploy.button("🚀 Deploy Anchor"):
+        if st.session_state.selected_geoid not in st.session_state.deployed_anchors:
+            st.session_state.deployed_anchors[st.session_state.selected_geoid] = []
+        st.session_state.deployed_anchors[st.session_state.selected_geoid].append(deployment_key)
+        st.sidebar.success(f"Deployed!")
         
-        # Multivariate feature matrix for matching
-        X = gdf_mapped[['job_growth', 'high_wage_growth', 'C000_21']].fillna(0).values
-        nn = NearestNeighbors(n_neighbors=5).fit(X)
-        distances, indices = nn.kneighbors(match_row[['job_growth', 'high_wage_growth', 'C000_21']].fillna(0).values)
-        peer_tracts = gdf_mapped.iloc[indices[0]]
-        avg_peer_growth = peer_tracts['job_growth'].mean()
-        
-        # Scenario Multipliers & Hedonic Zillow-style Housing Impact Coefficients
-        scenarios = {
-            "Add Major Fulfillment / Logistics Hub (e.g., Amazon)": {"job_lift": 380, "high_wage_lift": 140, "housing_pct": 0.085, "spillover": 120},
-            "Add Medium-Size College / University": {"job_lift": 520, "high_wage_lift": 380, "housing_pct": 0.135, "spillover": 210},
-            "Add Regional Hospital / Medical Center": {"job_lift": 680, "high_wage_lift": 490, "housing_pct": 0.150, "spillover": 280},
-            "Add Anchor Supermarket / Retail Hub": {"job_lift": 95, "high_wage_lift": 30, "housing_pct": 0.045, "spillover": 40},
-            "Remove Existing Anchor (Negative Structural Shock)": {"job_lift": -350, "high_wage_lift": -180, "housing_pct": -0.110, "spillover": -150}
-        }
-        eff = scenarios[anchor_action]
-        net_jobs_proj = base_jobs + eff['job_lift'] + eff['spillover']
-        new_home_val = base_home_val * (1 + eff['housing_pct'])
-        val_diff = new_home_val - base_home_val
-        
-        st.sidebar.markdown("---")
-        st.sidebar.markdown(f"### 📊 Simulation Impact: Tract {simulated_geoid}")
-        st.sidebar.metric("Projected Total Jobs", f"{int(net_jobs_proj):,}", delta=f"{eff['job_lift'] + eff['spillover']:+d} total lift")
-        st.sidebar.metric("High-Wage Job Lift (>$40k)", f"+{eff['high_wage_lift']} jobs")
-        st.sidebar.metric("Est. Zillow-Style Median Home Value", f"${int(new_home_val):,}", delta=f"${int(val_diff):+,} ({eff['housing_pct']*100:+.1f}%)")
-        st.sidebar.info(f"💡 **Peer Benchmark:** Based on multivariate matching with 5 similar PA tracts (Avg Peer Job Growth: {int(avg_peer_growth)}).")
+    if col_clear.button("🗑️ Clear Deployed"):
+        if st.session_state.selected_geoid in st.session_state.deployed_anchors:
+            del st.session_state.deployed_anchors[st.session_state.selected_geoid]
+        st.sidebar.warning("Cleared.")
 
     filtered_tracts = gdf_mapped
     default_high_opp = True
@@ -371,14 +351,21 @@ if not filtered_tracts.empty:
 
     def style_job_base(feature):
         geoid = str(feature['properties'].get('GEOID'))
-        is_simulated = (simulated_geoid and geoid == simulated_geoid)
-        val = feature['properties'][metric_col]
-        return {
-            'fillColor': '#9400D3' if is_simulated else (colormap(val) if val is not None else 'transparent'),
-            'color': '#000000' if is_simulated else '#333333',
-            'weight': 3.0 if is_simulated else 0.4,
-            'fillOpacity': 0.9 if is_simulated else 0.75,
-        }
+        is_selected = (geoid == st.session_state.selected_geoid)
+        has_anchor = geoid in st.session_state.deployed_anchors and len(st.session_state.deployed_anchors[geoid]) > 0
+        
+        if has_anchor:
+            return {'fillColor': '#00FF00', 'color': '#000000', 'weight': 3.0, 'fillOpacity': 0.85}
+        elif is_selected:
+            return {'fillColor': '#9400D3', 'color': '#000000', 'weight': 3.0, 'fillOpacity': 0.85}
+        else:
+            val = feature['properties'][metric_col]
+            return {
+                'fillColor': colormap(val) if val is not None else 'transparent',
+                'color': '#333333',
+                'weight': 0.4,
+                'fillOpacity': 0.75,
+            }
 
     folium.GeoJson(
         filtered_tracts,
@@ -392,6 +379,17 @@ if not filtered_tracts.empty:
             style="background-color: white; color: #333333; font-family: arial; font-size: 12px; padding: 10px; max-width: 280px; word-wrap: break-word; white-space: normal; border-radius: 4px; box-shadow: 0 2px 5px rgba(0,0,0,0.3);"
         )
     ).add_to(m)
+
+# Render Deployed Simulation Anchors on Map
+for geoid, anchors in st.session_state.deployed_anchors.items():
+    tract_geom = gdf_mapped[gdf_mapped['GEOID'].astype(str) == geoid]
+    if not tract_geom.empty:
+        centroid = tract_geom.geometry.centroid.iloc[0]
+        folium.Marker(
+            location=[centroid.y, centroid.x],
+            popup=f"Tract {geoid}: Deployed Anchors -> {', '.join(anchors)}",
+            icon=folium.Icon(color='purple', icon='industry', prefix='fa')
+        ).add_to(m)
 
 # Layer 2: Permit Capital Density Heatmap
 if show_permits and not gdf_permits.empty:
@@ -489,4 +487,70 @@ if not filtered_infra.empty:
         ).add_to(marker_cluster)
 
 folium.LayerControl(collapsed=False).add_to(m)
-st_folium(m, use_container_width=True, returned_objects=[], height=700)
+
+# Capture Map Clicks for Interactive Simulation
+map_output = st_folium(m, use_container_width=True, returned_objects=['last_clicked'], height=700)
+
+if map_output and map_output.get('last_clicked'):
+    click_lat = map_output['last_clicked']['lat']
+    click_lng = map_output['last_clicked']['lng']
+    click_pt = Point(click_lng, click_lat)
+    
+    containing_tract = gdf_mapped[gdf_mapped.contains(click_pt)]
+    if not containing_tract.empty:
+        clicked_geoid = str(containing_tract.iloc[0]['GEOID'])
+        if st.session_state.selected_geoid != clicked_geoid:
+            st.session_state.selected_geoid = clicked_geoid
+            st.rerun()
+
+# Display Simulation Impact Panel with Granular Sizing Multipliers
+if st.session_state.selected_geoid in st.session_state.deployed_anchors:
+    active_tract = gdf_mapped[gdf_mapped['GEOID'].astype(str) == st.session_state.selected_geoid]
+    if not active_tract.empty:
+        base_j = active_tract.iloc[0]['C000_21']
+        base_val = active_tract.iloc[0]['baseline_home_value']
+        
+        total_job_lift = 0
+        total_hw_lift = 0
+        total_housing_pct = 0.0
+        
+        # Granular Multiplier Dictionary for Sizes & Types
+        multiplier_matrix = {
+            "Small / Community-Scale Hospital / Medical Center": {"jobs": 60, "hw": 40, "housing": 0.025},
+            "Medium / Regional-Scale Hospital / Medical Center": {"jobs": 310, "hw": 220, "housing": 0.080},
+            "Large / Enterprise Mega-Scale Hospital / Medical Center": {"jobs": 720, "hw": 520, "housing": 0.160},
+            
+            "Small / Community-Scale Grocery Store / Supermarket": {"jobs": 30, "hw": 10, "housing": 0.015},
+            "Medium / Regional-Scale Grocery Store / Supermarket": {"jobs": 95, "hw": 30, "housing": 0.045},
+            "Large / Enterprise Mega-Scale Grocery Store / Supermarket": {"jobs": 220, "hw": 70, "housing": 0.075},
+            
+            "Small / Community-Scale College / University": {"jobs": 140, "hw": 100, "housing": 0.050},
+            "Medium / Regional-Scale College / University": {"jobs": 350, "hw": 260, "housing": 0.100},
+            "Large / Enterprise Mega-Scale College / University": {"jobs": 700, "hw": 520, "housing": 0.180},
+            
+            "Small / Community-Scale Fulfillment / Logistics Hub": {"jobs": 80, "hw": 25, "housing": 0.020},
+            "Medium / Regional-Scale Fulfillment / Logistics Hub": {"jobs": 240, "hw": 85, "housing": 0.060},
+            "Large / Enterprise Mega-Scale Fulfillment / Logistics Hub": {"jobs": 480, "hw": 160, "housing": 0.110}
+        }
+        
+        for anchor_name in st.session_state.deployed_anchors[st.session_state.selected_geoid]:
+            if anchor_name in multiplier_matrix:
+                m_data = multiplier_matrix[anchor_name]
+                total_job_lift += m_data["jobs"]
+                total_hw_lift += m_data["hw"]
+                total_housing_pct += m_data["housing"]
+                
+        proj_jobs = base_j + total_job_lift
+        proj_val = base_val * (1 + total_housing_pct)
+        
+        st.markdown("---")
+        st.subheader(f"📈 Real-Time Impact Dashboard for Active Tract: `{st.session_state.selected_geoid}`")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Deployed Anchors", f"{len(st.session_state.deployed_anchors[st.session_state.selected_geoid])} active")
+        col2.metric("Projected Total Workplace Jobs", f"{int(proj_jobs):,}", delta=f"+{total_job_lift} lift")
+        col3.metric("Projected High-Wage Job Lift", f"+{total_hw_lift} jobs")
+        col4.metric("Est. Zillow-Style Median Home Value", f"${int(proj_val):,}", delta=f"${int(proj_val - base_val):+,} ({total_housing_pct*100:+.1f}%)")
+        
+        with st.expander("View Deployed Anchor Details"):
+            for a in st.session_state.deployed_anchors[st.session_state.selected_geoid]:
+                st.markdown(f"- {a}")
