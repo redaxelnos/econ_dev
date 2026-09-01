@@ -346,6 +346,14 @@ if not selected_row.empty:
     base_j, base_val = row_data['C000_21'], row_data['baseline_home_value']
     detected_features = tract_detected_features.get(st.session_state.selected_geoid, [])
     
+    # Establish Historical Narrative Based on Job Growth
+    jg = int(row_data['job_growth'])
+    if jg <= -50: trend_word, trend_color = "Severe Historical Decline", "red"
+    elif jg < 0: trend_word, trend_color = "Contracting Job Market", "orange"
+    elif jg == 0: trend_word, trend_color = "Stagnant Market", "gray"
+    elif jg < 50: trend_word, trend_color = "Moderate Growth", "green"
+    else: trend_word, trend_color = "Rapid Economic Expansion", "green"
+
     # --- SUITABILITY ENGINE ---
     if base_j > 3000:
         likely_anchor = "Medium / Regional-Scale Hospital or College"
@@ -363,8 +371,18 @@ if not selected_row.empty:
         st.markdown("#### 📋 Baseline Tract Diagnostics")
         st.write(f"- **Census GEOID:** `{st.session_state.selected_geoid}`")
         st.write(f"- **Baseline Workplace Jobs:** `{int(base_j):,}`")
+        st.write(f"- **Historical Job Growth (16-21):** `{jg:+d}` (:{trend_color}[{trend_word}])")
         st.write(f"- **Est. Baseline Home Value:** `${int(base_val):,}`")
         
+        st.markdown(f"**🔍 Existing Infrastructure Context (OSM):**")
+        if detected_features:
+            for feat in detected_features:
+                st.markdown(f"- ✅ Detected: `{feat.title()}`")
+            st.caption(f"These existing anchors currently support the tract's {trend_word.lower()} baseline.")
+        else:
+            st.markdown("- *No major commercial anchors detected via OpenStreetMap in this specific block.*")
+            st.caption(f"The lack of localized economic infrastructure correlates directly with the tract's {trend_word.lower()} baseline.")
+            
         st.markdown("#### 🤖 AI Site Suitability Assessment")
         st.success(f"**Highly Probable Fit:** {likely_anchor}")
         st.info(f"**Dream Catalyst Scenario:** {dream_anchor}")
@@ -403,7 +421,6 @@ if not selected_row.empty:
     # ==========================================
     # --- DYNAMIC I-O IMPACT & TIME DILATION ---
     # ==========================================
-    # ALWAYS SHOW DASHBOARD (Baseline is 0 if no mods)
     st.markdown("---")
     st.markdown("### 📊 Baseline & Projected Input-Output (I-O) Economic Impact")
     
@@ -441,38 +458,59 @@ if not selected_row.empty:
     }
     
     tot_capex, tot_const, tot_direct, tot_indirect, tot_induced, tot_tax, tot_retail, tot_housing_pct = 0, 0, 0, 0, 0, 0, 0, 0.0
-    
     has_commercial = False
     has_transit = False
+    max_build_years = 1 # Default for small/community projects
+    
+    job_categories = set()
 
-    # Outlier Detection Engine (Clean Summary instead of spamming every row)
+    # Outlier & Feasibility Detection Engine
     if current_mods:
         dream_flags = []
         stretch_flags = []
+        plausible_flags = []
         
         for anchor_name in current_mods:
-            # Check feasibility for warnings
-            if ("Mega-Scale" in anchor_name or "High-Speed Rail" in anchor_name) and base_j < 1500:
-                dream_flags.append(anchor_name)
-            elif ("Regional" in anchor_name or "BRT" in anchor_name) and base_j < 500:
-                stretch_flags.append(anchor_name)
+            # Feasibility Check
+            if ("Mega-Scale" in anchor_name or "High-Speed Rail" in anchor_name) and base_j < 1500: dream_flags.append(anchor_name)
+            elif ("Regional" in anchor_name or "BRT" in anchor_name) and base_j < 500: stretch_flags.append(anchor_name)
+            else: plausible_flags.append(anchor_name)
+
+            # DYNAMIC TIMELINE (Critical Path Detection)
+            if "Mega-Scale Hospital" in anchor_name or "High-Speed Rail" in anchor_name or "Mega-Scale College" in anchor_name or "Mega-Scale Advanced Manufacturing" in anchor_name or "Mega-Scale Tech" in anchor_name:
+                max_build_years = max(max_build_years, 5)
+            elif "Regional-Scale Hospital" in anchor_name or "Smart Freight Corridor" in anchor_name or "BRT" in anchor_name or "Large / Enterprise" in anchor_name:
+                max_build_years = max(max_build_years, 3)
+            elif "Medium / Regional" in anchor_name or "Small / Community-Scale Hospital" in anchor_name or "University" in anchor_name or "Manufacturing" in anchor_name:
+                max_build_years = max(max_build_years, 2)
+            else:
+                max_build_years = max(max_build_years, 1)
 
             if anchor_name in io_matrix:
                 if "Transit" in anchor_name or "BRT" in anchor_name or "Complete Streets" in anchor_name or "Freight" in anchor_name: has_transit = True
                 elif "Campus" in anchor_name or "Hospital" in anchor_name or "Hub" in anchor_name: has_commercial = True
+                
+                # Assign Job Sectors based on Anchor
+                if "Hospital" in anchor_name: job_categories.update(["Clinical Healthcare", "Medical Admin", "Facilities Ops"])
+                elif "Grocery" in anchor_name: job_categories.update(["Retail Sales", "Inventory Mgt", "Customer Service"])
+                elif "College" in anchor_name: job_categories.update(["Higher Education", "Research", "Campus Admin"])
+                elif "Fulfillment" in anchor_name: job_categories.update(["Logistics", "Warehousing", "Supply Chain Ops"])
+                elif "Bank" in anchor_name: job_categories.update(["Financial Services", "Wealth Mgt", "Retail Banking"])
+                elif "Childcare" in anchor_name: job_categories.update(["Early Education", "Caregiving"])
+                elif "Manufacturing" in anchor_name: job_categories.update(["Precision Manufacturing", "Engineering", "Assembly"])
+                elif "Tech" in anchor_name: job_categories.update(["Software Engineering", "R&D", "Data Science"])
+                elif "Transit" in anchor_name or "BRT" in anchor_name or "Rail" in anchor_name or "Complete Streets" in anchor_name: job_categories.update(["Transit Operations", "Fleet Maintenance", "Civil Engineering"])
 
                 d = io_matrix[anchor_name]
                 tot_capex += d["capex"]; tot_const += d["const"]; tot_direct += d["direct"]
                 tot_indirect += d["indirect"]; tot_induced += d["induced"]; tot_tax += d["tax"]
                 tot_retail += d["retail"]; tot_housing_pct += d["housing"]
 
-        # Render Exception Warnings only if they exist
-        if dream_flags or stretch_flags:
-            st.markdown("#### ⚠️ Deployment Feasibility Alerts")
-            if dream_flags:
-                st.error(f"**🟣 Dream Scenario (Low probability without extreme zoning overrides):** {', '.join(dream_flags)}")
-            if stretch_flags:
-                st.warning(f"**🟡 Stretch Goal (Requires aggressive tax incentives):** {', '.join(stretch_flags)}")
+        # Render Feasibility Alerts & Positive Validations
+        st.markdown("#### 🎯 Deployment Feasibility Analysis")
+        if plausible_flags: st.success(f"**🟢 Plausible & Highly Likely (Strong, realistic fit for current tract baseline):** {', '.join(plausible_flags)}")
+        if stretch_flags: st.warning(f"**🟡 Stretch Goal (Requires aggressive tax incentives & municipal rezoning):** {', '.join(stretch_flags)}")
+        if dream_flags: st.error(f"**🟣 Dream Scenario (Extremely low probability without total capital overhaul):** {', '.join(dream_flags)}")
     
     # --- SYNERGY MULTIPLIER (Transit-Oriented Development Boost) ---
     synergy_active = has_commercial and has_transit
@@ -519,22 +557,28 @@ if not selected_row.empty:
         h4.metric("Secondary Housing Bump", f"+{tot_housing_pct*100*0.35:.1f}% avg lift")
         
     with t3:
-        st.markdown("Economic impacts do not materialize instantly. Below is the probabilistic realization timeframe:")
+        st.markdown("Economic impacts do not materialize instantly. Below is the realistic, probabilistic realization timeframe broken down by job type based on the **Critical Path Development Timeline** of your selected anchors:")
         c1, c2, c3 = st.columns(3)
+        
+        core_sectors = ", ".join(list(job_categories)[:6]) if job_categories else "Mixed Commercial Operations"
+
         with c1:
-            st.markdown("#### Phase 1: Years 0 - 2")
-            st.markdown(f"- **Construction Jobs:** {tot_const:,} (Peak)")
+            st.markdown(f"#### Phase 1: Years 0 - {max_build_years} (Development)")
+            st.markdown(f"- **Primary Workforce:** Heavy Civil construction, Trades (Steel, Electrical, Carpentry), Architecture & Engineering.")
+            st.markdown(f"- **Construction Jobs:** {tot_const:,} (Temporary Peak)")
             st.markdown(f"- **CapEx Deployed:** ${tot_capex}M")
             st.markdown("- **Operational Jobs:** 0")
             st.markdown("- **Housing Impact:** Speculative bump (+1%)")
         with c2:
-            st.markdown("#### Phase 2: Years 3 - 5")
-            st.markdown(f"- **Direct Hiring:** {tot_direct:,} jobs (Ramp-up)")
+            st.markdown(f"#### Phase 2: Years {max_build_years + 1} - {max_build_years + 3} (Ramp-Up)")
+            st.markdown(f"- **Emerging Sectors:** Initial facility hiring focusing on **{core_sectors}**.")
+            st.markdown(f"- **Direct Hiring:** {tot_direct:,} jobs (Initial Operations)")
             st.markdown(f"- **Tax Base:** 50% realization (${tot_tax * 0.5:,.0f})")
-            st.markdown(f"- **Halo Spillover:** Supply chains form.")
-            st.markdown(f"- **Housing Impact:** Accelerated growth.")
+            st.markdown(f"- **Halo Spillover:** Logistics & supply chains begin forming.")
+            st.markdown(f"- **Housing Impact:** Accelerated growth driven by incoming workforce.")
         with c3:
-            st.markdown("#### Phase 3: Years 5 - 10+")
+            st.markdown(f"#### Phase 3: Years {max_build_years + 4}+ (Maturation)")
+            st.markdown(f"- **Dominant Sectors:** Stabilized **{core_sectors}**, supplemented by massive secondary retail, civic administration, and local services.")
             st.markdown(f"- **Full Stabilization:** {int(primary_jobs_created + halo_total_jobs):,} total regional jobs.")
             st.markdown(f"- **Full Tax Yield:** ${tot_tax + halo_tax:,.0f} annually.")
             st.markdown(f"- **Agglomeration:** Surrounding retail & services fully matured.")
