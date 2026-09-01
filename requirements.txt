@@ -1,6 +1,9 @@
-streamlit==1.38.0
+streamlit
 pandas
 geopandas
-folium
-streamlit-folium
 osmnx
+folium
+requests
+numpy
+branca
+streamlit-folium
