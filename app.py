@@ -145,15 +145,14 @@ with st.spinner(f"Loading {selected_region} Data & Spatial Matrices..."):
     gdf_infra = load_osm_data(selected_region)
     gdf_permits = load_permit_data() if selected_region == "Pittsburgh" else gpd.GeoDataFrame()
 
-# --- CACHED SPATIAL INFRASTRUCTURE MATCHING ---
-@st.cache_data
-def get_detected_features(selected_region):
+# --- SPATIAL INFRASTRUCTURE MATCHING ---
+def get_detected_features(region_name, infra_df, mapped_df):
     tract_features = {}
-    if selected_region == "Statewide View" or gdf_infra.empty:
+    if region_name == "Statewide View" or infra_df.empty or mapped_df.empty:
         return tract_features
     try:
-        infra_proj = gdf_infra.to_crs(gdf_mapped.crs)
-        joined = gpd.sjoin(infra_proj, gdf_mapped[['GEOID', 'geometry']], how='inner', predicate='within')
+        infra_proj = infra_df.to_crs(mapped_df.crs)
+        joined = gpd.sjoin(infra_proj, mapped_df[['GEOID', 'geometry']], how='inner', predicate='within')
         for geoid, group in joined.groupby('GEOID'):
             amenities = [str(row.get('amenity') or row.get('shop') or row.get('public_transport')) for _, row in group.iterrows() if pd.notna(row.get('amenity') or row.get('shop') or row.get('public_transport'))]
             tract_features[str(geoid)] = list(set(amenities))
@@ -161,7 +160,7 @@ def get_detected_features(selected_region):
         pass
     return tract_features
 
-tract_detected_features = get_detected_features(selected_region)
+tract_detected_features = get_detected_features(selected_region, gdf_infra, gdf_mapped)
 
 # --- SPATIAL SPILLOVER HALO CALCULATION ---
 halo_radius_m = 0
