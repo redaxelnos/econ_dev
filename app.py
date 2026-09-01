@@ -38,33 +38,36 @@ selected_region = st.sidebar.selectbox("Select Target Analysis Region", list(REG
 region_coords = REGIONS[selected_region]["coords"]
 region_zoom = REGIONS[selected_region]["zoom"]
 
-# 1. Federal Data (MEMORY OPTIMIZED)
+# 1. Federal Data (EXTREME CLOUD MEMORY OPTIMIZATION via Chunking)
 @st.cache_data
 def load_census_data():
     base_url = "https://lehd.ces.census.gov/data/lodes/LODES8/pa"
     
-    # Load crosswalk
+    # Load crosswalk once
     xwalk = pd.read_csv(f"{base_url}/pa_xwalk.csv.gz", usecols=['tabblk2020', 'trct'], dtype=str)
     
-    # Load 2021, merge, aggregate, and DELETE from memory immediately
-    wac_21 = pd.read_csv(f"{base_url}/wac/pa_wac_S000_JT00_2021.csv.gz", usecols=['w_geocode', 'C000', 'CE03'], dtype={'w_geocode': str})
-    wac_21 = wac_21.merge(xwalk, left_on='w_geocode', right_on='tabblk2020')
-    tract_21 = wac_21.groupby('trct')[['C000', 'CE03']].sum().reset_index()
-    del wac_21 # Free RAM
+    # Process 2021 Data in small chunks so the Cloud RAM doesn't crash
+    tract_21 = pd.DataFrame()
+    for chunk in pd.read_csv(f"{base_url}/wac/pa_wac_S000_JT00_2021.csv.gz", usecols=['w_geocode', 'C000', 'CE03'], dtype={'w_geocode': str}, chunksize=50000):
+        merged = chunk.merge(xwalk, left_on='w_geocode', right_on='tabblk2020')
+        agg = merged.groupby('trct')[['C000', 'CE03']].sum().reset_index()
+        tract_21 = pd.concat([tract_21, agg]).groupby('trct').sum().reset_index()
+        
+    # Process 2016 Data in small chunks
+    tract_16 = pd.DataFrame()
+    for chunk in pd.read_csv(f"{base_url}/wac/pa_wac_S000_JT00_2016.csv.gz", usecols=['w_geocode', 'C000', 'CE03'], dtype={'w_geocode': str}, chunksize=50000):
+        merged = chunk.merge(xwalk, left_on='w_geocode', right_on='tabblk2020')
+        agg = merged.groupby('trct')[['C000', 'CE03']].sum().reset_index()
+        tract_16 = pd.concat([tract_16, agg]).groupby('trct').sum().reset_index()
     
-    # Load 2016, merge, aggregate, and DELETE
-    wac_16 = pd.read_csv(f"{base_url}/wac/pa_wac_S000_JT00_2016.csv.gz", usecols=['w_geocode', 'C000', 'CE03'], dtype={'w_geocode': str})
-    wac_16 = wac_16.merge(xwalk, left_on='w_geocode', right_on='tabblk2020')
-    tract_16 = wac_16.groupby('trct')[['C000', 'CE03']].sum().reset_index()
-    del wac_16 # Free RAM
-    del xwalk
+    del xwalk # Free up RAM explicitly
     
-    # Merge the tiny dataframes safely
+    # Merge the tiny, aggregated dataframes safely
     df_jobs = pd.merge(tract_21, tract_16, on='trct', suffixes=('_21', '_16'), how='outer').fillna(0)
     df_jobs['job_growth'] = df_jobs['C000_21'] - df_jobs['C000_16']
     df_jobs['high_wage_growth'] = df_jobs['CE03_21'] - df_jobs['CE03_16']
     
-    # Load Shapefile and simplify aggressively
+    # Load Shapefile and simplify aggressively for the browser
     tiger_url = "https://www2.census.gov/geo/tiger/TIGER2021/TRACT/tl_2021_42_tract.zip"
     gdf_tracts = gpd.read_file(tiger_url)
     gdf_tracts['geometry'] = gdf_tracts['geometry'].simplify(tolerance=0.005, preserve_topology=True)
@@ -152,7 +155,7 @@ with st.spinner(f"Loading {selected_region} Data & Compiling Spatial Matrices...
         gdf_infra = load_osm_data(selected_region)
         gdf_permits = load_permit_data() if selected_region == "Pittsburgh" else gpd.GeoDataFrame()
     except Exception as e:
-        st.error(f"Failed to load core data: {e}")
+        st.error(f"Failed to load core data. The cloud server may be experiencing high latency: {e}")
         st.stop()
 
 # --- SPATIAL INFRASTRUCTURE MATCHING ---
