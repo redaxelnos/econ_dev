@@ -67,14 +67,13 @@ def load_census_data():
     
     return gdf_mapped
 
-# 2. Capital Velocity Data (WPRDC - Pittsburgh Only)
+# 2. Capital Velocity Data
 @st.cache_data
 def load_permit_data():
     wprdc_url = "https://data.wprdc.org/api/3/action/datastore_search"
     params = {'resource_id': '20162fb2-7a09-43c1-b0b3-34e87754d9a8', 'q': 'COMMERCIAL', 'limit': 1000}
-    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
     try:
-        response = requests.get(wprdc_url, params=params, headers=headers, timeout=10)
+        response = requests.get(wprdc_url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         df_permits = pd.DataFrame(response.json()['result']['records'])
         if df_permits.empty: return gpd.GeoDataFrame()
         df_permits['cost'] = pd.to_numeric(df_permits.get('estimated_cost', 0), errors='coerce').fillna(0)
@@ -86,7 +85,7 @@ def load_permit_data():
     except Exception:
         return gpd.GeoDataFrame()
 
-# 3. OSM Economic Anchor Infrastructure Data
+# 3. OSM Economic Anchor Data
 @st.cache_data
 def load_osm_data(city_name):
     if city_name == "Statewide View": return gpd.GeoDataFrame()
@@ -106,44 +105,40 @@ def load_osm_data(city_name):
 def load_federal_boundaries(layer_type):
     url = "https://services6.arcgis.com/zDzo4EZXf1AjkPjO/ArcGIS/rest/services/Qualified_Census_Tracts_2025/FeatureServer/0/query" if layer_type == "QCT" else "https://services.arcgis.com/VTyQ9soqVukalItT/arcgis/rest/services/Opportunity_Zones/FeatureServer/0/query"
     out_fields = "GEOID,TRACT,NAME" if layer_type == "QCT" else "TRACT,STATE_NAME"
-    
     all_features = []
     offset = 0
-    batch_size = 1000
-    
     while True:
-        params = {"where": "STATE='42' OR 1=1", "outFields": out_fields, "resultRecordCount": batch_size, "resultOffset": offset, "f": "geojson"}
+        params = {"where": "STATE='42' OR 1=1", "outFields": out_fields, "resultRecordCount": 1000, "resultOffset": offset, "f": "geojson"}
         try:
             response = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
             if response.ok:
-                data = response.json()
-                features = data.get("features", [])
+                features = response.json().get("features", [])
                 if not features: break
                 all_features.extend(features)
-                if len(features) < batch_size: break
-                offset += batch_size
+                if len(features) < 1000: break
+                offset += 1000
             else: break
         except Exception: break
-            
     if all_features:
-        geo_dict = {"type": "FeatureCollection", "features": all_features}
-        gdf = gpd.GeoDataFrame.from_features(geo_dict, crs="EPSG:4326")
+        gdf = gpd.GeoDataFrame.from_features({"type": "FeatureCollection", "features": all_features}, crs="EPSG:4326")
         if layer_type == "QCT":
-            gdf['Designation'] = 'HUD Distressed Area (QCT)'
-            gdf['Strategic_Note'] = 'Qualifies for LIHTC 30% basis boost & federal grants (50%+ low-income or 25%+ poverty).'
+            gdf['Designation'], gdf['Strategic_Note'] = 'HUD Distressed Area (QCT)', 'Qualifies for LIHTC 30% basis boost & federal grants.'
         else:
-            gdf['Designation'] = 'Federal Opportunity Zone'
-            gdf['Strategic_Note'] = 'Eligible for capital gains tax deferments & step-ups.'
+            gdf['Designation'], gdf['Strategic_Note'] = 'Federal Opportunity Zone', 'Eligible for capital gains tax deferments & step-ups.'
         return gdf
     return gpd.GeoDataFrame()
 
 # --- INITIALIZE & LOAD DATA ---
 with st.spinner(f"Loading {selected_region} Data & Spatial Matrices..."):
-    gdf_mapped = load_census_data()
-    gdf_qct = load_federal_boundaries("QCT")
-    gdf_oz = load_federal_boundaries("OZ")
-    gdf_infra = load_osm_data(selected_region)
-    gdf_permits = load_permit_data() if selected_region == "Pittsburgh" else gpd.GeoDataFrame()
+    try:
+        gdf_mapped = load_census_data()
+        gdf_qct = load_federal_boundaries("QCT")
+        gdf_oz = load_federal_boundaries("OZ")
+        gdf_infra = load_osm_data(selected_region)
+        gdf_permits = load_permit_data() if selected_region == "Pittsburgh" else gpd.GeoDataFrame()
+    except Exception as e:
+        st.error(f"Failed to load core data: {e}")
+        st.stop()
 
 # --- SPATIAL INFRASTRUCTURE MATCHING ---
 def get_detected_features(region_name, infra_df, mapped_df):
@@ -162,29 +157,48 @@ def get_detected_features(region_name, infra_df, mapped_df):
 
 tract_detected_features = get_detected_features(selected_region, gdf_infra, gdf_mapped)
 
-# --- SPATIAL SPILLOVER HALO CALCULATION ---
+# --- DYNAMIC SPATIAL SPILLOVER HALO CALCULATION (Area/Density Proportional) ---
 halo_radius_m = 0
+base_radius_m = 0
 spillover_geoids = []
+zone_type = "Unknown"
+halo_radius_miles = 0
 primary_geoid = st.session_state.selected_geoid
 active_mods = st.session_state.tract_modifications.get(primary_geoid, [])
 
 if active_mods:
     for anchor in active_mods:
-        if "Large" in anchor: halo_radius_m = max(halo_radius_m, 8046) # 5 miles
-        elif "Medium" in anchor: halo_radius_m = max(halo_radius_m, 3218) # 2 miles
-        elif "Small" in anchor: halo_radius_m = max(halo_radius_m, 1609) # 1 mile
+        if "Large" in anchor: base_radius_m = max(base_radius_m, 8046) # Base 5 miles
+        elif "Medium" in anchor: base_radius_m = max(base_radius_m, 3218) # Base 2 miles
+        elif "Small" in anchor: base_radius_m = max(base_radius_m, 1609) # Base 1 mile
         
-    if halo_radius_m > 0 and not gdf_mapped.empty:
+    if base_radius_m > 0 and not gdf_mapped.empty:
         try:
             active_tract_geom = gdf_mapped[gdf_mapped['GEOID'] == primary_geoid]
             if not active_tract_geom.empty:
                 target_geom_3857 = active_tract_geom.to_crs(epsg=3857).geometry.iloc[0]
-                buffer_geom = target_geom_3857.buffer(halo_radius_m)
-                all_3857 = gdf_mapped.to_crs(epsg=3857)
-                spillover_mask = all_3857.intersects(buffer_geom) & (all_3857['GEOID'] != primary_geoid)
-                spillover_geoids = all_3857[spillover_mask]['GEOID'].astype(str).tolist()
-        except Exception:
-            pass
+                tract_area_sqkm = target_geom_3857.area / 1e6
+                
+                # Topographic Density Multiplier Logic
+                if tract_area_sqkm < 2.0:
+                    zone_type, multiplier = "Dense Urban", 0.70
+                elif tract_area_sqkm < 10.0:
+                    zone_type, multiplier = "Suburban", 1.0
+                elif tract_area_sqkm < 50.0:
+                    zone_type, multiplier = "Exurban / Rural", 2.0
+                else:
+                    zone_type, multiplier = "Deep Rural", 4.0
+                
+                halo_radius_m = base_radius_m * multiplier
+                halo_radius_miles = round(halo_radius_m / 1609.34, 1)
+                
+                buffer_3857 = gpd.GeoSeries([target_geom_3857], crs="EPSG:3857").buffer(halo_radius_m)
+                buffer_4326 = buffer_3857.to_crs(epsg=4326).iloc[0]
+                
+                spillover_mask = gdf_mapped.intersects(buffer_4326) & (gdf_mapped['GEOID'] != primary_geoid)
+                spillover_geoids = gdf_mapped[spillover_mask]['GEOID'].astype(str).tolist()
+        except Exception as e:
+            st.warning(f"Could not compute regional spillover halo: {e}")
 
 # --- PRECISE DIAGNOSTIC EVALUATION ---
 qct_ids = set(gdf_qct['GEOID'].astype(str)) if not gdf_qct.empty and 'GEOID' in gdf_qct.columns else set()
@@ -270,67 +284,68 @@ show_high_risk = st.sidebar.checkbox("High-Risk / Caution Zones - Neon Red", val
 show_qct = st.sidebar.checkbox("Distressed Areas (HUD QCT) - Neon Blue", value=default_qct)
 show_oz = st.sidebar.checkbox("Opportunity Zones (OZ) - Neon White", value=default_oz)
 
-# --- RENDER MAP ---
-m = folium.Map(location=region_coords, zoom_start=region_zoom, tiles="OpenStreetMap")
+# --- SAFE MAP RENDERING WRAPPER ---
+try:
+    m = folium.Map(location=region_coords, zoom_start=region_zoom, tiles="OpenStreetMap")
 
-if not filtered_tracts.empty:
-    global_p5, global_p95 = np.percentile(gdf_mapped[metric_col].dropna(), [5, 95])
-    vmin, vmax = min(global_p5, gdf_mapped[metric_col].min()), max(global_p95, gdf_mapped[metric_col].max())
-    if vmin == vmax: vmax += 1
+    if not filtered_tracts.empty:
+        global_p5, global_p95 = np.percentile(gdf_mapped[metric_col].dropna(), [5, 95])
+        vmin, vmax = min(global_p5, gdf_mapped[metric_col].min()), max(global_p95, gdf_mapped[metric_col].max())
+        if vmin == vmax: vmax += 1
 
-    colormap = cm.LinearColormap(colors=['#d73027', '#fee08b', '#1a9850'], vmin=vmin, vmax=vmax)
-    colormap.caption = f'Net Growth: {base_metric} (Absolute Statewide Scale)'
-    colormap.add_to(m)
+        colormap = cm.LinearColormap(colors=['#d73027', '#fee08b', '#1a9850'], vmin=vmin, vmax=vmax)
+        colormap.caption = f'Net Growth: {base_metric} (Absolute Statewide Scale)'
+        colormap.add_to(m)
 
-    def style_job_base(feature):
-        geoid = str(feature['properties'].get('GEOID'))
-        is_selected = (geoid == st.session_state.selected_geoid)
-        has_mod = geoid in st.session_state.tract_modifications and len(st.session_state.tract_modifications[geoid]) > 0
-        is_halo = geoid in spillover_geoids
-        
-        if has_mod: return {'fillColor': '#00FF00', 'color': '#000000', 'weight': 3.5, 'fillOpacity': 0.85}
-        elif is_halo: return {'fillColor': '#00BFFF', 'color': '#00BFFF', 'weight': 2.5, 'dashArray': '5, 5', 'fillOpacity': 0.45}
-        elif is_selected: return {'fillColor': '#9400D3', 'color': '#000000', 'weight': 3.5, 'fillOpacity': 0.85}
-        else:
-            val = feature['properties'][metric_col]
-            return {'fillColor': colormap(val) if val is not None else 'transparent', 'color': '#333333', 'weight': 0.4, 'fillOpacity': 0.75}
+        def style_job_base(feature):
+            geoid = str(feature['properties'].get('GEOID'))
+            is_selected = (geoid == st.session_state.selected_geoid)
+            has_mod = geoid in st.session_state.tract_modifications and len(st.session_state.tract_modifications[geoid]) > 0
+            is_halo = geoid in spillover_geoids
+            
+            if has_mod: return {'fillColor': '#00FF00', 'color': '#000000', 'weight': 3.5, 'fillOpacity': 0.85}
+            elif is_halo: return {'fillColor': '#00BFFF', 'color': '#00BFFF', 'weight': 2.5, 'dashArray': '5, 5', 'fillOpacity': 0.45}
+            elif is_selected: return {'fillColor': '#9400D3', 'color': '#000000', 'weight': 3.5, 'fillOpacity': 0.85}
+            else:
+                val = feature['properties'][metric_col]
+                return {'fillColor': colormap(val) if val is not None else 'transparent', 'color': '#333333', 'weight': 0.4, 'fillOpacity': 0.75}
 
-    folium.GeoJson(
-        filtered_tracts,
-        name='Job Creation Heatmap (LEHD)',
-        style_function=style_job_base,
-        tooltip=folium.features.GeoJsonTooltip(fields=['GEOID', 'job_growth', 'high_wage_growth', 'baseline_home_value', 'Investment_Rating'], aliases=['Census Tract ID:', 'Total Job Growth:', 'High-Wage Growth:', 'Est. Median Home Value:', 'Diagnostic Evaluation:'], localize=True, sticky=True, style="background-color: white; color: #333333; font-family: arial; font-size: 12px; padding: 10px; max-width: 280px; word-wrap: break-word; white-space: normal;")
-    ).add_to(m)
+        folium.GeoJson(
+            filtered_tracts,
+            name='Job Creation Heatmap (LEHD)',
+            style_function=style_job_base,
+            tooltip=folium.features.GeoJsonTooltip(fields=['GEOID', 'job_growth', 'high_wage_growth', 'baseline_home_value', 'Investment_Rating'], aliases=['Census Tract ID:', 'Total Job Growth:', 'High-Wage Growth:', 'Est. Median Home Value:', 'Diagnostic Evaluation:'], localize=True, sticky=True, style="background-color: white; color: #333333; font-family: arial; font-size: 12px; padding: 10px; max-width: 280px; word-wrap: break-word; white-space: normal;")
+        ).add_to(m)
 
-# Fix Map Element Names: Group all simulated markers into one human-readable FeatureGroup
-sim_group = folium.FeatureGroup(name="Simulated Interventions (Deployments)")
-for geoid, mods in st.session_state.tract_modifications.items():
-    if mods:
-        tract_geom = gdf_mapped[gdf_mapped['GEOID'].astype(str) == geoid]
-        if not tract_geom.empty:
-            centroid = tract_geom.geometry.centroid.iloc[0]
-            folium.Marker(location=[centroid.y, centroid.x], popup=f"Tract {geoid}: Modifications -> {', '.join(mods)}", icon=folium.Icon(color='green', icon='industry', prefix='fa')).add_to(sim_group)
-sim_group.add_to(m)
+    sim_group = folium.FeatureGroup(name="Simulated Interventions (Deployments)")
+    for geoid, mods in st.session_state.tract_modifications.items():
+        if mods:
+            tract_geom = gdf_mapped[gdf_mapped['GEOID'].astype(str) == geoid]
+            if not tract_geom.empty:
+                centroid = tract_geom.geometry.centroid.iloc[0]
+                folium.Marker(location=[centroid.y, centroid.x], popup=f"Tract {geoid}: Modifications -> {', '.join(mods)}", icon=folium.Icon(color='green', icon='industry', prefix='fa')).add_to(sim_group)
+    sim_group.add_to(m)
 
-if show_permits and not gdf_permits.empty:
-    HeatMap([[row.geometry.y, row.geometry.x, row['cost']] for idx, row in gdf_permits.iterrows()], name="Capital Investment Density", radius=15, blur=10, max_zoom=1).add_to(m)
-if show_high_opp and not gdf_high_opp.empty: folium.GeoJson(gdf_high_opp, name="High Opportunity Hubs", style_function=lambda x: {'color': '#FFFF00', 'weight': 3.0, 'fillColor': '#FFFF00', 'fillOpacity': 0.3, 'dashArray': '2, 2'}).add_to(m)
-if show_high_risk and not gdf_high_risk.empty: folium.GeoJson(gdf_high_risk, name="High-Risk / Caution Zones", style_function=lambda x: {'color': '#FF0055', 'weight': 3.5, 'fillColor': '#FF0055', 'fillOpacity': 0.3, 'dashArray': '5, 3'}).add_to(m)
-if show_qct and not gdf_qct.empty: folium.GeoJson(gdf_qct, name="HUD Qualified Census Tracts", style_function=lambda x: {'color': '#00FFFF', 'weight': 3.5, 'fillColor': '#00FFFF', 'fillOpacity': 0.25, 'dashArray': '4, 4'}).add_to(m)
-if show_oz and not gdf_oz.empty: folium.GeoJson(gdf_oz, name="Federal Opportunity Zones", style_function=lambda x: {'color': '#FFFFFF', 'weight': 3.5, 'fillColor': '#FFFFFF', 'fillOpacity': 0.25}).add_to(m)
+    if show_permits and not gdf_permits.empty: HeatMap([[row.geometry.y, row.geometry.x, row['cost']] for idx, row in gdf_permits.iterrows()], name="Capital Investment Density", radius=15, blur=10, max_zoom=1).add_to(m)
+    if show_high_opp and not gdf_high_opp.empty: folium.GeoJson(gdf_high_opp, name="High Opportunity Hubs", style_function=lambda x: {'color': '#FFFF00', 'weight': 3.0, 'fillColor': '#FFFF00', 'fillOpacity': 0.3, 'dashArray': '2, 2'}).add_to(m)
+    if show_high_risk and not gdf_high_risk.empty: folium.GeoJson(gdf_high_risk, name="High-Risk / Caution Zones", style_function=lambda x: {'color': '#FF0055', 'weight': 3.5, 'fillColor': '#FF0055', 'fillOpacity': 0.3, 'dashArray': '5, 3'}).add_to(m)
+    if show_qct and not gdf_qct.empty: folium.GeoJson(gdf_qct, name="HUD Qualified Census Tracts", style_function=lambda x: {'color': '#00FFFF', 'weight': 3.5, 'fillColor': '#00FFFF', 'fillOpacity': 0.25, 'dashArray': '4, 4'}).add_to(m)
+    if show_oz and not gdf_oz.empty: folium.GeoJson(gdf_oz, name="Federal Opportunity Zones", style_function=lambda x: {'color': '#FFFFFF', 'weight': 3.5, 'fillColor': '#FFFFFF', 'fillOpacity': 0.25}).add_to(m)
 
-folium.LayerControl(collapsed=False).add_to(m)
+    folium.LayerControl(collapsed=False).add_to(m)
+    map_output = st_folium(m, use_container_width=True, returned_objects=['last_clicked'], height=600)
 
-map_output = st_folium(m, use_container_width=True, returned_objects=['last_clicked'], height=600)
+    if map_output and map_output.get('last_clicked'):
+        click_lat, click_lng = map_output['last_clicked']['lat'], map_output['last_clicked']['lng']
+        containing_tract = gdf_mapped[gdf_mapped.contains(Point(click_lng, click_lat))]
+        if not containing_tract.empty:
+            clicked_geoid = str(containing_tract.iloc[0]['GEOID'])
+            if st.session_state.selected_geoid != clicked_geoid:
+                st.session_state.selected_geoid = clicked_geoid
+                st.rerun()
 
-if map_output and map_output.get('last_clicked'):
-    click_lat, click_lng = map_output['last_clicked']['lat'], map_output['last_clicked']['lng']
-    containing_tract = gdf_mapped[gdf_mapped.contains(Point(click_lng, click_lat))]
-    if not containing_tract.empty:
-        clicked_geoid = str(containing_tract.iloc[0]['GEOID'])
-        if st.session_state.selected_geoid != clicked_geoid:
-            st.session_state.selected_geoid = clicked_geoid
-            st.rerun()
+except Exception as e:
+    st.error(f"Map Rendering Error: {str(e)}")
 
 # ==========================================
 # --- INTERACTIVE TRACT INSPECTOR ---
@@ -459,7 +474,7 @@ if not selected_row.empty:
     tot_capex, tot_const, tot_direct, tot_indirect, tot_induced, tot_tax, tot_retail, tot_housing_pct = 0, 0, 0, 0, 0, 0, 0, 0.0
     has_commercial = False
     has_transit = False
-    max_build_years = 1 # Default for small/community projects
+    max_build_years = 1 
     
     job_categories = set()
 
@@ -505,13 +520,11 @@ if not selected_row.empty:
                 tot_indirect += d["indirect"]; tot_induced += d["induced"]; tot_tax += d["tax"]
                 tot_retail += d["retail"]; tot_housing_pct += d["housing"]
 
-        # Render Feasibility Alerts & Positive Validations
         st.markdown("#### 🎯 Deployment Feasibility Analysis")
         if plausible_flags: st.success(f"**🟢 Plausible & Highly Likely (Strong, realistic fit for current tract baseline):** {', '.join(plausible_flags)}")
         if stretch_flags: st.warning(f"**🟡 Stretch Goal (Requires aggressive tax incentives & municipal rezoning):** {', '.join(stretch_flags)}")
         if dream_flags: st.error(f"**🟣 Dream Scenario (Extremely low probability without total capital overhaul):** {', '.join(dream_flags)}")
     
-    # --- SYNERGY MULTIPLIER (Transit-Oriented Development Boost) ---
     synergy_active = has_commercial and has_transit
     synergy_multiplier = 1.25 if synergy_active else 1.0
 
@@ -546,7 +559,7 @@ if not selected_row.empty:
         
     with t2:
         if current_mods:
-            st.info(f"Economic effects radiate to **{len(spillover_geoids)}** neighboring tracts in a {round(halo_radius_m/1609.34, 1)}-mile radius (dashed blue on map).")
+            st.info(f"Economic effects radiate to **{len(spillover_geoids)}** neighboring tracts. The model detected a **{zone_type}** topology, dynamically adjusting the trade area radius to **{halo_radius_miles} miles** to account for local density.")
         else:
             st.info("Deploy anchors to view regional spatial spillovers.")
         h1, h2, h3, h4 = st.columns(4)
@@ -556,28 +569,31 @@ if not selected_row.empty:
         h4.metric("Secondary Housing Bump", f"+{tot_housing_pct*100*0.35:.1f}% avg lift")
         
     with t3:
-        st.markdown("Economic impacts do not materialize instantly. Below is the realistic, probabilistic realization timeframe broken down by job type based on the **Critical Path Development Timeline** of your selected anchors:")
-        c1, c2, c3 = st.columns(3)
-        
-        core_sectors = ", ".join(list(job_categories)[:6]) if job_categories else "Mixed Commercial Operations"
+        if not current_mods:
+            st.info("Deploy an anchor to generate a probabilistic Temporal Impact timeline.")
+        else:
+            st.markdown("Economic impacts do not materialize instantly. Below is the realistic, probabilistic realization timeframe broken down by job type based on the **Critical Path Development Timeline** of your selected anchors:")
+            c1, c2, c3 = st.columns(3)
+            
+            core_sectors = ", ".join(list(job_categories)[:6]) if job_categories else "Mixed Commercial Operations"
 
-        with c1:
-            st.markdown(f"#### Phase 1: Years 0 - {max_build_years} (Development)")
-            st.markdown(f"- **Primary Workforce:** Heavy Civil construction, Trades (Steel, Electrical, Carpentry), Architecture & Engineering.")
-            st.markdown(f"- **Construction Jobs:** {tot_const:,} (Temporary Peak)")
-            st.markdown(f"- **CapEx Deployed:** ${tot_capex}M")
-            st.markdown("- **Operational Jobs:** 0")
-            st.markdown("- **Housing Impact:** Speculative bump (+1%)")
-        with c2:
-            st.markdown(f"#### Phase 2: Years {max_build_years + 1} - {max_build_years + 3} (Ramp-Up)")
-            st.markdown(f"- **Emerging Sectors:** Initial facility hiring focusing on **{core_sectors}**.")
-            st.markdown(f"- **Direct Hiring:** {tot_direct:,} jobs (Initial Operations)")
-            st.markdown(f"- **Tax Base:** 50% realization (${tot_tax * 0.5:,.0f})")
-            st.markdown(f"- **Halo Spillover:** Logistics & supply chains begin forming.")
-            st.markdown(f"- **Housing Impact:** Accelerated growth driven by incoming workforce.")
-        with c3:
-            st.markdown(f"#### Phase 3: Years {max_build_years + 4}+ (Maturation)")
-            st.markdown(f"- **Dominant Sectors:** Stabilized **{core_sectors}**, supplemented by massive secondary retail, civic administration, and local services.")
-            st.markdown(f"- **Full Stabilization:** {int(primary_jobs_created + halo_total_jobs):,} total regional jobs.")
-            st.markdown(f"- **Full Tax Yield:** ${tot_tax + halo_tax:,.0f} annually.")
-            st.markdown(f"- **Agglomeration:** Surrounding retail & services fully matured.")
+            with c1:
+                st.markdown(f"#### Phase 1: Years 0 - {max_build_years} (Development)")
+                st.markdown(f"- **Primary Workforce:** Heavy Civil construction, Trades (Steel, Electrical, Carpentry), Architecture & Engineering.")
+                st.markdown(f"- **Construction Jobs:** {tot_const:,} (Temporary Peak)")
+                st.markdown(f"- **CapEx Deployed:** ${tot_capex}M")
+                st.markdown("- **Operational Jobs:** 0")
+                st.markdown("- **Housing Impact:** Speculative bump (+1%)")
+            with c2:
+                st.markdown(f"#### Phase 2: Years {max_build_years + 1} - {max_build_years + 3} (Ramp-Up)")
+                st.markdown(f"- **Emerging Sectors:** Initial facility hiring focusing on **{core_sectors}**.")
+                st.markdown(f"- **Direct Hiring:** {tot_direct:,} jobs (Initial Operations)")
+                st.markdown(f"- **Tax Base:** 50% realization (${tot_tax * 0.5:,.0f})")
+                st.markdown(f"- **Halo Spillover:** Logistics & supply chains begin forming.")
+                st.markdown(f"- **Housing Impact:** Accelerated growth driven by incoming workforce.")
+            with c3:
+                st.markdown(f"#### Phase 3: Years {max_build_years + 4}+ (Maturation)")
+                st.markdown(f"- **Dominant Sectors:** Stabilized **{core_sectors}**, supplemented by massive secondary retail, civic administration, and local services.")
+                st.markdown(f"- **Full Stabilization:** {int(primary_jobs_created + halo_total_jobs):,} total regional jobs.")
+                st.markdown(f"- **Full Tax Yield:** ${tot_tax + halo_tax:,.0f} annually.")
+                st.markdown(f"- **Agglomeration:** Surrounding retail & services fully matured.")
