@@ -198,19 +198,32 @@ analysis_mode = st.sidebar.radio(
 base_metric = st.sidebar.radio("Base Heatmap Metric (LEHD)", ["Total Job Growth (All Wages)", "High-Wage Job Growth (>$40k/yr)"])
 metric_col = 'job_growth' if base_metric == "Total Job Growth (All Wages)" else 'high_wage_growth'
 
-# Dynamic filtering based on Analysis Focus Mode
+# Smart Defaults & Filtering based on Analysis Focus Mode
 if analysis_mode == "⚠️ Severely Disadvantaged & High-Need Focus (Critical Intervention)":
     filtered_tracts = gdf_mapped[gdf_mapped['job_growth'] <= -30]
     st.sidebar.error("Showing *only* severely disadvantaged tracts experiencing severe job contraction (net loss of 30+ jobs).")
+    # Auto-sync boundary visibility to match objective
+    default_high_opp = False
+    default_high_risk = True
+    default_qct = True
+    default_oz = True
 elif analysis_mode == "🚨 Turnaround & Intervention Target Focus (Declining/Distressed Only)":
     filtered_tracts = gdf_mapped[
         (gdf_mapped[metric_col] < 20) & 
         (gdf_mapped['Investment_Rating'].str.contains("High-Risk|Distressed", na=False))
     ]
     st.sidebar.warning("Showing *only* distressed or declining tracts requiring capital intervention.")
+    default_high_opp = False
+    default_high_risk = True
+    default_qct = True
+    default_oz = True
 elif analysis_mode == "🌟 High-Growth Scaling Focus (Expansion Hubs Only)":
     filtered_tracts = gdf_mapped[gdf_mapped['Investment_Rating'].str.contains("High Opportunity|High-Growth", na=False)]
     st.sidebar.success("Showing *only* high-growth expansion and opportunity hubs.")
+    default_high_opp = True
+    default_high_risk = False
+    default_qct = False
+    default_oz = False
 else:
     min_growth = st.sidebar.slider(
         "Minimum Job Growth Threshold", 
@@ -220,6 +233,10 @@ else:
         step=50
     )
     filtered_tracts = gdf_mapped[gdf_mapped[metric_col] >= min_growth]
+    default_high_opp = True
+    default_high_risk = True
+    default_qct = True
+    default_oz = True
 
 if selected_region == "Pittsburgh":
     show_permits = st.sidebar.checkbox("Overlay Capital Investment Heatmap (WPRDC)", value=True)
@@ -237,10 +254,10 @@ with st.sidebar.expander("ℹ️ Complete Statutory & Algorithmic Makeup", expan
     - **Opportunity Zones (Neon White):** Treasury-certified low-income communities designated for capital gains tax deferment benefits.
     """)
 
-show_high_opp = st.sidebar.checkbox("High Opportunity Hubs - Neon Yellow Infill", value=True)
-show_high_risk = st.sidebar.checkbox("High-Risk / Caution Zones - Neon Red Infill", value=True)
-show_qct = st.sidebar.checkbox("Distressed Areas (HUD QCT) - Neon Blue Infill", value=True)
-show_oz = st.sidebar.checkbox("Opportunity Zones (OZ) - Neon White Infill", value=True)
+show_high_opp = st.sidebar.checkbox("High Opportunity Hubs - Neon Yellow Infill", value=default_high_opp)
+show_high_risk = st.sidebar.checkbox("High-Risk / Caution Zones - Neon Red Infill", value=default_high_risk)
+show_qct = st.sidebar.checkbox("Distressed Areas (HUD QCT) - Neon Blue Infill", value=default_qct)
+show_oz = st.sidebar.checkbox("Opportunity Zones (OZ) - Neon White Infill", value=default_oz)
 
 st.sidebar.markdown("---")
 st.sidebar.header("Economic Anchors")
@@ -263,7 +280,7 @@ else:
 # --- RENDER MAP ---
 m = folium.Map(location=region_coords, zoom_start=region_zoom, tiles="OpenStreetMap")
 
-# Layer 1: Absolute Global Percentile-Clamped Base Map (Ensures colors stay absolute across filters)
+# Layer 1: Absolute Global Percentile-Clamped Base Map
 if not filtered_tracts.empty:
     global_p5, global_p95 = np.percentile(gdf_mapped[metric_col].dropna(), [5, 95])
     vmin = min(global_p5, gdf_mapped[metric_col].min())
