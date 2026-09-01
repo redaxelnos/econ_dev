@@ -56,6 +56,10 @@ def load_census_data():
     
     tiger_url = "https://www2.census.gov/geo/tiger/TIGER2021/TRACT/tl_2021_42_tract.zip"
     gdf_tracts = gpd.read_file(tiger_url)
+    
+    # CRITICAL FIX 1: Simplify Geometry to prevent browser/websocket crashes!
+    gdf_tracts['geometry'] = gdf_tracts['geometry'].simplify(tolerance=0.001, preserve_topology=True)
+    
     gdf_mapped = gdf_tracts.merge(tract_jobs, left_on='GEOID', right_on='trct', how='left')
     gdf_mapped['job_growth'] = gdf_mapped['job_growth'].fillna(0)
     gdf_mapped['high_wage_growth'] = gdf_mapped['high_wage_growth'].fillna(0)
@@ -107,8 +111,13 @@ def load_federal_boundaries(layer_type):
     out_fields = "GEOID,TRACT,NAME" if layer_type == "QCT" else "TRACT,STATE_NAME"
     all_features = []
     offset = 0
-    while True:
-        params = {"where": "STATE='42' OR 1=1", "outFields": out_fields, "resultRecordCount": 1000, "resultOffset": offset, "f": "geojson"}
+    
+    # CRITICAL FIX 2: Stopped National Data Leak. Only pulls GEOID's starting with 42 (Pennsylvania)
+    where_clause = "GEOID LIKE '42%'" if layer_type == "QCT" else "TRACT LIKE '42%'"
+    
+    # Cap at 5000 tracts to prevent infinite loop memory crashes
+    while offset < 5000:
+        params = {"where": where_clause, "outFields": out_fields, "resultRecordCount": 1000, "resultOffset": offset, "f": "geojson"}
         try:
             response = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
             if response.ok:
@@ -119,8 +128,12 @@ def load_federal_boundaries(layer_type):
                 offset += 1000
             else: break
         except Exception: break
+            
     if all_features:
         gdf = gpd.GeoDataFrame.from_features({"type": "FeatureCollection", "features": all_features}, crs="EPSG:4326")
+        if not gdf.empty:
+            gdf['geometry'] = gdf['geometry'].simplify(tolerance=0.001, preserve_topology=True)
+            
         if layer_type == "QCT":
             gdf['Designation'], gdf['Strategic_Note'] = 'HUD Distressed Area (QCT)', 'Qualifies for LIHTC 30% basis boost & federal grants.'
         else:
@@ -179,15 +192,10 @@ if active_mods:
                 target_geom_3857 = active_tract_geom.to_crs(epsg=3857).geometry.iloc[0]
                 tract_area_sqkm = target_geom_3857.area / 1e6
                 
-                # Topographic Density Multiplier Logic
-                if tract_area_sqkm < 2.0:
-                    zone_type, multiplier = "Dense Urban", 0.70
-                elif tract_area_sqkm < 10.0:
-                    zone_type, multiplier = "Suburban", 1.0
-                elif tract_area_sqkm < 50.0:
-                    zone_type, multiplier = "Exurban / Rural", 2.0
-                else:
-                    zone_type, multiplier = "Deep Rural", 4.0
+                if tract_area_sqkm < 2.0: zone_type, multiplier = "Dense Urban", 0.70
+                elif tract_area_sqkm < 10.0: zone_type, multiplier = "Suburban", 1.0
+                elif tract_area_sqkm < 50.0: zone_type, multiplier = "Exurban / Rural", 2.0
+                else: zone_type, multiplier = "Deep Rural", 4.0
                 
                 halo_radius_m = base_radius_m * multiplier
                 halo_radius_miles = round(halo_radius_m / 1609.34, 1)
@@ -360,7 +368,6 @@ if not selected_row.empty:
     base_j, base_val = row_data['C000_21'], row_data['baseline_home_value']
     detected_features = tract_detected_features.get(st.session_state.selected_geoid, [])
     
-    # Establish Historical Narrative Based on Job Growth
     jg = int(row_data['job_growth'])
     if jg <= -50: trend_word, trend_color = "Severe Historical Decline", "red"
     elif jg < 0: trend_word, trend_color = "Contracting Job Market", "orange"
@@ -368,7 +375,6 @@ if not selected_row.empty:
     elif jg < 50: trend_word, trend_color = "Moderate Growth", "green"
     else: trend_word, trend_color = "Rapid Economic Expansion", "green"
 
-    # --- SUITABILITY ENGINE ---
     if base_j > 3000:
         likely_anchor = "Medium / Regional-Scale Hospital or College"
         dream_anchor = "Large / Enterprise Mega-Scale Tech Campus & Transit Hub"
@@ -390,8 +396,7 @@ if not selected_row.empty:
         
         st.markdown(f"**🔍 Existing Infrastructure Context (OSM):**")
         if detected_features:
-            for feat in detected_features:
-                st.markdown(f"- ✅ Detected: `{feat.title()}`")
+            for feat in detected_features: st.markdown(f"- ✅ Detected: `{feat.title()}`")
             st.caption(f"These existing anchors currently support the tract's {trend_word.lower()} baseline.")
         else:
             st.markdown("- *No major commercial anchors detected via OpenStreetMap in this specific block.*")
@@ -414,7 +419,6 @@ if not selected_row.empty:
             "Small / Community-Scale Childcare Facility", "Medium / Regional-Scale Childcare Facility", "Large / Enterprise Mega-Scale Childcare Facility",
             "Small / Community-Scale Advanced Manufacturing", "Medium / Regional-Scale Advanced Manufacturing", "Large / Enterprise Mega-Scale Advanced Manufacturing",
             "Small / Community-Scale Tech / R&D Campus", "Medium / Regional-Scale Tech / R&D Campus", "Large / Enterprise Mega-Scale Tech / R&D Campus",
-            
             "Small / Community EV Charging & Micro-Grid Hub", "Medium / Regional Complete Streets & Pedestrianization", "Medium / Regional Bus Rapid Transit (BRT) Corridor",
             "Large / Enterprise Smart Freight Corridor", "Large / Enterprise High-Speed Rail & Transit Hub"
         ]
@@ -463,7 +467,6 @@ if not selected_row.empty:
         "Small / Community-Scale Tech / R&D Campus": {"capex": 12, "const": 35, "direct": 60, "indirect": 15, "induced": 45, "tax": 350000, "retail": 18, "housing": 0.040},
         "Medium / Regional-Scale Tech / R&D Campus": {"capex": 80, "const": 220, "direct": 300, "indirect": 80, "induced": 240, "tax": 1600000, "retail": 90, "housing": 0.110},
         "Large / Enterprise Mega-Scale Tech / R&D Campus": {"capex": 300, "const": 850, "direct": 950, "indirect": 260, "induced": 750, "tax": 5500000, "retail": 280, "housing": 0.210},
-        
         "Small / Community EV Charging & Micro-Grid Hub": {"capex": 5, "const": 15, "direct": 5, "indirect": 5, "induced": 5, "tax": 40000, "retail": 10, "housing": 0.015},
         "Medium / Regional Complete Streets & Pedestrianization": {"capex": 45, "const": 150, "direct": 20, "indirect": 15, "induced": 50, "tax": 800000, "retail": 350, "housing": 0.060}, 
         "Medium / Regional Bus Rapid Transit (BRT) Corridor": {"capex": 120, "const": 400, "direct": 150, "indirect": 60, "induced": 90, "tax": 1500000, "retail": 200, "housing": 0.080},
@@ -478,33 +481,25 @@ if not selected_row.empty:
     
     job_categories = set()
 
-    # Outlier & Feasibility Detection Engine
     if current_mods:
         dream_flags = []
         stretch_flags = []
         plausible_flags = []
         
         for anchor_name in current_mods:
-            # Feasibility Check
             if ("Mega-Scale" in anchor_name or "High-Speed Rail" in anchor_name) and base_j < 1500: dream_flags.append(anchor_name)
             elif ("Regional" in anchor_name or "BRT" in anchor_name) and base_j < 500: stretch_flags.append(anchor_name)
             else: plausible_flags.append(anchor_name)
 
-            # DYNAMIC TIMELINE (Critical Path Detection)
-            if "Mega-Scale Hospital" in anchor_name or "High-Speed Rail" in anchor_name or "Mega-Scale College" in anchor_name or "Mega-Scale Advanced Manufacturing" in anchor_name or "Mega-Scale Tech" in anchor_name:
-                max_build_years = max(max_build_years, 5)
-            elif "Regional-Scale Hospital" in anchor_name or "Smart Freight Corridor" in anchor_name or "BRT" in anchor_name or "Large / Enterprise" in anchor_name:
-                max_build_years = max(max_build_years, 3)
-            elif "Medium / Regional" in anchor_name or "Small / Community-Scale Hospital" in anchor_name or "University" in anchor_name or "Manufacturing" in anchor_name:
-                max_build_years = max(max_build_years, 2)
-            else:
-                max_build_years = max(max_build_years, 1)
+            if "Mega-Scale Hospital" in anchor_name or "High-Speed Rail" in anchor_name or "Mega-Scale College" in anchor_name or "Mega-Scale Advanced Manufacturing" in anchor_name or "Mega-Scale Tech" in anchor_name: max_build_years = max(max_build_years, 5)
+            elif "Regional-Scale Hospital" in anchor_name or "Smart Freight Corridor" in anchor_name or "BRT" in anchor_name or "Large / Enterprise" in anchor_name: max_build_years = max(max_build_years, 3)
+            elif "Medium / Regional" in anchor_name or "Small / Community-Scale Hospital" in anchor_name or "University" in anchor_name or "Manufacturing" in anchor_name: max_build_years = max(max_build_years, 2)
+            else: max_build_years = max(max_build_years, 1)
 
             if anchor_name in io_matrix:
                 if "Transit" in anchor_name or "BRT" in anchor_name or "Complete Streets" in anchor_name or "Freight" in anchor_name: has_transit = True
                 elif "Campus" in anchor_name or "Hospital" in anchor_name or "Hub" in anchor_name: has_commercial = True
                 
-                # Assign Job Sectors based on Anchor
                 if "Hospital" in anchor_name: job_categories.update(["Clinical Healthcare", "Medical Admin", "Facilities Ops"])
                 elif "Grocery" in anchor_name: job_categories.update(["Retail Sales", "Inventory Mgt", "Customer Service"])
                 elif "College" in anchor_name: job_categories.update(["Higher Education", "Research", "Campus Admin"])
