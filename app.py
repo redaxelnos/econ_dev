@@ -257,6 +257,15 @@ show_permits = st.sidebar.checkbox("Overlay Capital Investment Heatmap (WPRDC)",
 
 st.sidebar.markdown("---")
 st.sidebar.header("Policy & Opportunity Boundaries")
+with st.sidebar.expander("ℹ️ Complete Statutory & Algorithmic Makeup", expanded=False):
+    st.markdown("""
+    - **Severely Disadvantaged Zones (Crimson):** Tracts experiencing severe job hemorrhage (loss of 30+ jobs). Requires emergency structural intervention.
+    - **High Opportunity Hubs (Neon Yellow):** Non-distressed tracts where high-wage expansion exceeds the regional 75th percentile. Framed for private investment scaling.
+    - **High-Risk / Caution Zones (Neon Red):** Distressed tracts experiencing net job decline (less than -10 jobs). Flags structural headwinds where tax incentives alone historically fail.
+    - **HUD QCT (Neon Blue):** Statutory low-income tracts (50%+ households under 60% AMGI or 25%+ poverty). Unlocks LIHTC 30% basis boosts.
+    - **Opportunity Zones (Neon White):** Treasury-certified low-income communities designated for capital gains tax deferment benefits.
+    """)
+
 show_high_opp = st.sidebar.checkbox("High Opportunity Hubs - Neon Yellow", value=default_high_opp)
 show_high_risk = st.sidebar.checkbox("High-Risk / Caution Zones - Neon Red", value=default_high_risk)
 show_qct = st.sidebar.checkbox("Distressed Areas (HUD QCT) - Neon Blue", value=default_qct)
@@ -289,23 +298,27 @@ if not filtered_tracts.empty:
 
     folium.GeoJson(
         filtered_tracts,
+        name='Job Creation Heatmap (LEHD)',
         style_function=style_job_base,
         tooltip=folium.features.GeoJsonTooltip(fields=['GEOID', 'job_growth', 'high_wage_growth', 'baseline_home_value', 'Investment_Rating'], aliases=['Census Tract ID:', 'Total Job Growth:', 'High-Wage Growth:', 'Est. Median Home Value:', 'Diagnostic Evaluation:'], localize=True, sticky=True, style="background-color: white; color: #333333; font-family: arial; font-size: 12px; padding: 10px; max-width: 280px; word-wrap: break-word; white-space: normal;")
     ).add_to(m)
 
+# Fix Map Element Names: Group all simulated markers into one human-readable FeatureGroup
+sim_group = folium.FeatureGroup(name="Simulated Interventions (Deployments)")
 for geoid, mods in st.session_state.tract_modifications.items():
     if mods:
         tract_geom = gdf_mapped[gdf_mapped['GEOID'].astype(str) == geoid]
         if not tract_geom.empty:
             centroid = tract_geom.geometry.centroid.iloc[0]
-            folium.Marker(location=[centroid.y, centroid.x], popup=f"Tract {geoid}: Modifications -> {', '.join(mods)}", icon=folium.Icon(color='green', icon='industry', prefix='fa')).add_to(m)
+            folium.Marker(location=[centroid.y, centroid.x], popup=f"Tract {geoid}: Modifications -> {', '.join(mods)}", icon=folium.Icon(color='green', icon='industry', prefix='fa')).add_to(sim_group)
+sim_group.add_to(m)
 
 if show_permits and not gdf_permits.empty:
-    HeatMap([[row.geometry.y, row.geometry.x, row['cost']] for idx, row in gdf_permits.iterrows()], radius=15, blur=10, max_zoom=1).add_to(m)
-if show_high_opp and not gdf_high_opp.empty: folium.GeoJson(gdf_high_opp, style_function=lambda x: {'color': '#FFFF00', 'weight': 3.0, 'fillColor': '#FFFF00', 'fillOpacity': 0.3, 'dashArray': '2, 2'}).add_to(m)
-if show_high_risk and not gdf_high_risk.empty: folium.GeoJson(gdf_high_risk, style_function=lambda x: {'color': '#FF0055', 'weight': 3.5, 'fillColor': '#FF0055', 'fillOpacity': 0.3, 'dashArray': '5, 3'}).add_to(m)
-if show_qct and not gdf_qct.empty: folium.GeoJson(gdf_qct, style_function=lambda x: {'color': '#00FFFF', 'weight': 3.5, 'fillColor': '#00FFFF', 'fillOpacity': 0.25, 'dashArray': '4, 4'}).add_to(m)
-if show_oz and not gdf_oz.empty: folium.GeoJson(gdf_oz, style_function=lambda x: {'color': '#FFFFFF', 'weight': 3.5, 'fillColor': '#FFFFFF', 'fillOpacity': 0.25}).add_to(m)
+    HeatMap([[row.geometry.y, row.geometry.x, row['cost']] for idx, row in gdf_permits.iterrows()], name="Capital Investment Density", radius=15, blur=10, max_zoom=1).add_to(m)
+if show_high_opp and not gdf_high_opp.empty: folium.GeoJson(gdf_high_opp, name="High Opportunity Hubs", style_function=lambda x: {'color': '#FFFF00', 'weight': 3.0, 'fillColor': '#FFFF00', 'fillOpacity': 0.3, 'dashArray': '2, 2'}).add_to(m)
+if show_high_risk and not gdf_high_risk.empty: folium.GeoJson(gdf_high_risk, name="High-Risk / Caution Zones", style_function=lambda x: {'color': '#FF0055', 'weight': 3.5, 'fillColor': '#FF0055', 'fillOpacity': 0.3, 'dashArray': '5, 3'}).add_to(m)
+if show_qct and not gdf_qct.empty: folium.GeoJson(gdf_qct, name="HUD Qualified Census Tracts", style_function=lambda x: {'color': '#00FFFF', 'weight': 3.5, 'fillColor': '#00FFFF', 'fillOpacity': 0.25, 'dashArray': '4, 4'}).add_to(m)
+if show_oz and not gdf_oz.empty: folium.GeoJson(gdf_oz, name="Federal Opportunity Zones", style_function=lambda x: {'color': '#FFFFFF', 'weight': 3.5, 'fillColor': '#FFFFFF', 'fillOpacity': 0.25}).add_to(m)
 
 folium.LayerControl(collapsed=False).add_to(m)
 
@@ -336,12 +349,12 @@ if not selected_row.empty:
     # --- SUITABILITY ENGINE ---
     if base_j > 3000:
         likely_anchor = "Medium / Regional-Scale Hospital or College"
-        dream_anchor = "Large / Enterprise Mega-Scale Tech Campus"
+        dream_anchor = "Large / Enterprise Mega-Scale Tech Campus & Transit Hub"
     elif base_j > 800:
-        likely_anchor = "Small / Community-Scale Grocery Store or Fulfillment Hub"
+        likely_anchor = "Small / Community-Scale Grocery Store or BRT Expansion"
         dream_anchor = "Large / Enterprise Mega-Scale Hospital"
     else:
-        likely_anchor = "Small / Community-Scale Childcare Facility"
+        likely_anchor = "Small / Community-Scale Childcare Facility or EV Hub"
         dream_anchor = "Medium / Regional-Scale Advanced Manufacturing"
 
     col_info, col_controls = st.columns([1, 1.2])
@@ -357,7 +370,7 @@ if not selected_row.empty:
         st.info(f"**Dream Catalyst Scenario:** {dream_anchor}")
 
     with col_controls:
-        st.markdown("#### 🛠️ Add / Subtract Features & Infrastructure")
+        st.markdown("#### 🛠️ Add / Subtract Features, Infrastructure & Transit")
         current_mods = st.session_state.tract_modifications.get(st.session_state.selected_geoid, [])
         
         feature_options = [
@@ -368,7 +381,10 @@ if not selected_row.empty:
             "Small / Community-Scale Bank / Financial Institution", "Medium / Regional-Scale Bank / Financial Institution", "Large / Enterprise Mega-Scale Bank / Financial Institution",
             "Small / Community-Scale Childcare Facility", "Medium / Regional-Scale Childcare Facility", "Large / Enterprise Mega-Scale Childcare Facility",
             "Small / Community-Scale Advanced Manufacturing", "Medium / Regional-Scale Advanced Manufacturing", "Large / Enterprise Mega-Scale Advanced Manufacturing",
-            "Small / Community-Scale Tech / R&D Campus", "Medium / Regional-Scale Tech / R&D Campus", "Large / Enterprise Mega-Scale Tech / R&D Campus"
+            "Small / Community-Scale Tech / R&D Campus", "Medium / Regional-Scale Tech / R&D Campus", "Large / Enterprise Mega-Scale Tech / R&D Campus",
+            
+            "Small / Community EV Charging & Micro-Grid Hub", "Medium / Regional Complete Streets & Pedestrianization", "Medium / Regional Bus Rapid Transit (BRT) Corridor",
+            "Large / Enterprise Smart Freight Corridor", "Large / Enterprise High-Speed Rail & Transit Hub"
         ]
         
         with st.form(key=f"sim_form_{st.session_state.selected_geoid}"):
@@ -387,97 +403,138 @@ if not selected_row.empty:
     # ==========================================
     # --- DYNAMIC I-O IMPACT & TIME DILATION ---
     # ==========================================
+    # ALWAYS SHOW DASHBOARD (Baseline is 0 if no mods)
+    st.markdown("---")
+    st.markdown("### 📊 Baseline & Projected Input-Output (I-O) Economic Impact")
+    
+    io_matrix = {
+        "Small / Community-Scale Hospital / Medical Center": {"capex": 15, "const": 45, "direct": 50, "indirect": 15, "induced": 20, "tax": 450000, "retail": 12, "housing": 0.025},
+        "Medium / Regional-Scale Hospital / Medical Center": {"capex": 150, "const": 400, "direct": 300, "indirect": 120, "induced": 150, "tax": 3500000, "retail": 75, "housing": 0.080},
+        "Large / Enterprise Mega-Scale Hospital / Medical Center": {"capex": 500, "const": 1400, "direct": 700, "indirect": 350, "induced": 420, "tax": 12000000, "retail": 190, "housing": 0.160},
+        "Small / Community-Scale Grocery Store / Supermarket": {"capex": 2, "const": 10, "direct": 25, "indirect": 6, "induced": 10, "tax": 60000, "retail": 5, "housing": 0.015},
+        "Medium / Regional-Scale Grocery Store / Supermarket": {"capex": 18, "const": 50, "direct": 90, "indirect": 28, "induced": 35, "tax": 280000, "retail": 22, "housing": 0.045},
+        "Large / Enterprise Mega-Scale Grocery Store / Supermarket": {"capex": 45, "const": 120, "direct": 210, "indirect": 75, "induced": 85, "tax": 750000, "retail": 55, "housing": 0.075},
+        "Small / Community-Scale College / University": {"capex": 40, "const": 110, "direct": 120, "indirect": 45, "induced": 70, "tax": 150000, "retail": 40, "housing": 0.050},
+        "Medium / Regional-Scale College / University": {"capex": 180, "const": 500, "direct": 350, "indirect": 160, "induced": 240, "tax": 600000, "retail": 120, "housing": 0.100},
+        "Large / Enterprise Mega-Scale College / University": {"capex": 600, "const": 1800, "direct": 800, "indirect": 420, "induced": 650, "tax": 2200000, "retail": 320, "housing": 0.180},
+        "Small / Community-Scale Fulfillment / Logistics Hub": {"capex": 25, "const": 70, "direct": 75, "indirect": 30, "induced": 25, "tax": 400000, "retail": 14, "housing": 0.020},
+        "Medium / Regional-Scale Fulfillment / Logistics Hub": {"capex": 120, "const": 350, "direct": 250, "indirect": 115, "induced": 90, "tax": 1800000, "retail": 50, "housing": 0.060},
+        "Large / Enterprise Mega-Scale Fulfillment / Logistics Hub": {"capex": 350, "const": 1000, "direct": 500, "indirect": 260, "induced": 190, "tax": 4500000, "retail": 110, "housing": 0.110},
+        "Small / Community-Scale Bank / Financial Institution": {"capex": 2, "const": 8, "direct": 6, "indirect": 2, "induced": 3, "tax": 25000, "retail": 1, "housing": 0.005},
+        "Medium / Regional-Scale Bank / Financial Institution": {"capex": 10, "const": 30, "direct": 22, "indirect": 8, "induced": 10, "tax": 150000, "retail": 4, "housing": 0.020},
+        "Large / Enterprise Mega-Scale Bank / Financial Institution": {"capex": 75, "const": 250, "direct": 180, "indirect": 75, "induced": 90, "tax": 1200000, "retail": 25, "housing": 0.055},
+        "Small / Community-Scale Childcare Facility": {"capex": 0.3, "const": 3, "direct": 8, "indirect": 2, "induced": 3, "tax": 8000, "retail": 2, "housing": 0.010},
+        "Medium / Regional-Scale Childcare Facility": {"capex": 2, "const": 15, "direct": 28, "indirect": 8, "induced": 12, "tax": 45000, "retail": 6, "housing": 0.025},
+        "Large / Enterprise Mega-Scale Childcare Facility": {"capex": 8, "const": 40, "direct": 85, "indirect": 25, "induced": 35, "tax": 180000, "retail": 18, "housing": 0.050},
+        "Small / Community-Scale Advanced Manufacturing": {"capex": 20, "const": 60, "direct": 40, "indirect": 35, "induced": 20, "tax": 200000, "retail": 8, "housing": 0.030},
+        "Medium / Regional-Scale Advanced Manufacturing": {"capex": 85, "const": 250, "direct": 180, "indirect": 160, "induced": 85, "tax": 900000, "retail": 35, "housing": 0.075},
+        "Large / Enterprise Mega-Scale Advanced Manufacturing": {"capex": 400, "const": 1100, "direct": 600, "indirect": 550, "induced": 320, "tax": 3800000, "retail": 140, "housing": 0.140},
+        "Small / Community-Scale Tech / R&D Campus": {"capex": 12, "const": 35, "direct": 60, "indirect": 15, "induced": 45, "tax": 350000, "retail": 18, "housing": 0.040},
+        "Medium / Regional-Scale Tech / R&D Campus": {"capex": 80, "const": 220, "direct": 300, "indirect": 80, "induced": 240, "tax": 1600000, "retail": 90, "housing": 0.110},
+        "Large / Enterprise Mega-Scale Tech / R&D Campus": {"capex": 300, "const": 850, "direct": 950, "indirect": 260, "induced": 750, "tax": 5500000, "retail": 280, "housing": 0.210},
+        
+        "Small / Community EV Charging & Micro-Grid Hub": {"capex": 5, "const": 15, "direct": 5, "indirect": 5, "induced": 5, "tax": 40000, "retail": 10, "housing": 0.015},
+        "Medium / Regional Complete Streets & Pedestrianization": {"capex": 45, "const": 150, "direct": 20, "indirect": 15, "induced": 50, "tax": 800000, "retail": 350, "housing": 0.060}, 
+        "Medium / Regional Bus Rapid Transit (BRT) Corridor": {"capex": 120, "const": 400, "direct": 150, "indirect": 60, "induced": 90, "tax": 1500000, "retail": 200, "housing": 0.080},
+        "Large / Enterprise Smart Freight Corridor": {"capex": 600, "const": 1800, "direct": 150, "indirect": 800, "induced": 200, "tax": 5000000, "retail": 100, "housing": 0.050}, 
+        "Large / Enterprise High-Speed Rail & Transit Hub": {"capex": 800, "const": 2500, "direct": 400, "indirect": 200, "induced": 300, "tax": 8000000, "retail": 500, "housing": 0.250}
+    }
+    
+    tot_capex, tot_const, tot_direct, tot_indirect, tot_induced, tot_tax, tot_retail, tot_housing_pct = 0, 0, 0, 0, 0, 0, 0, 0.0
+    
+    has_commercial = False
+    has_transit = False
+
+    # Outlier Detection Engine (Clean Summary instead of spamming every row)
     if current_mods:
-        st.markdown("---")
-        st.markdown("### 📊 Input-Output (I-O) Regional Economic Impact")
-        
-        io_matrix = {
-            "Small / Community-Scale Hospital / Medical Center": {"capex": 15, "const": 45, "direct": 50, "indirect": 15, "induced": 20, "tax": 450000, "retail": 12, "housing": 0.025},
-            "Medium / Regional-Scale Hospital / Medical Center": {"capex": 150, "const": 400, "direct": 300, "indirect": 120, "induced": 150, "tax": 3500000, "retail": 75, "housing": 0.080},
-            "Large / Enterprise Mega-Scale Hospital / Medical Center": {"capex": 500, "const": 1400, "direct": 700, "indirect": 350, "induced": 420, "tax": 12000000, "retail": 190, "housing": 0.160},
-            "Small / Community-Scale Grocery Store / Supermarket": {"capex": 2, "const": 10, "direct": 25, "indirect": 6, "induced": 10, "tax": 60000, "retail": 5, "housing": 0.015},
-            "Medium / Regional-Scale Grocery Store / Supermarket": {"capex": 18, "const": 50, "direct": 90, "indirect": 28, "induced": 35, "tax": 280000, "retail": 22, "housing": 0.045},
-            "Large / Enterprise Mega-Scale Grocery Store / Supermarket": {"capex": 45, "const": 120, "direct": 210, "indirect": 75, "induced": 85, "tax": 750000, "retail": 55, "housing": 0.075},
-            "Small / Community-Scale College / University": {"capex": 40, "const": 110, "direct": 120, "indirect": 45, "induced": 70, "tax": 150000, "retail": 40, "housing": 0.050},
-            "Medium / Regional-Scale College / University": {"capex": 180, "const": 500, "direct": 350, "indirect": 160, "induced": 240, "tax": 600000, "retail": 120, "housing": 0.100},
-            "Large / Enterprise Mega-Scale College / University": {"capex": 600, "const": 1800, "direct": 800, "indirect": 420, "induced": 650, "tax": 2200000, "retail": 320, "housing": 0.180},
-            "Small / Community-Scale Fulfillment / Logistics Hub": {"capex": 25, "const": 70, "direct": 75, "indirect": 30, "induced": 25, "tax": 400000, "retail": 14, "housing": 0.020},
-            "Medium / Regional-Scale Fulfillment / Logistics Hub": {"capex": 120, "const": 350, "direct": 250, "indirect": 115, "induced": 90, "tax": 1800000, "retail": 50, "housing": 0.060},
-            "Large / Enterprise Mega-Scale Fulfillment / Logistics Hub": {"capex": 350, "const": 1000, "direct": 500, "indirect": 260, "induced": 190, "tax": 4500000, "retail": 110, "housing": 0.110},
-            "Small / Community-Scale Bank / Financial Institution": {"capex": 2, "const": 8, "direct": 6, "indirect": 2, "induced": 3, "tax": 25000, "retail": 1, "housing": 0.005},
-            "Medium / Regional-Scale Bank / Financial Institution": {"capex": 10, "const": 30, "direct": 22, "indirect": 8, "induced": 10, "tax": 150000, "retail": 4, "housing": 0.020},
-            "Large / Enterprise Mega-Scale Bank / Financial Institution": {"capex": 75, "const": 250, "direct": 180, "indirect": 75, "induced": 90, "tax": 1200000, "retail": 25, "housing": 0.055},
-            "Small / Community-Scale Childcare Facility": {"capex": 0.3, "const": 3, "direct": 8, "indirect": 2, "induced": 3, "tax": 8000, "retail": 2, "housing": 0.010},
-            "Medium / Regional-Scale Childcare Facility": {"capex": 2, "const": 15, "direct": 28, "indirect": 8, "induced": 12, "tax": 45000, "retail": 6, "housing": 0.025},
-            "Large / Enterprise Mega-Scale Childcare Facility": {"capex": 8, "const": 40, "direct": 85, "indirect": 25, "induced": 35, "tax": 180000, "retail": 18, "housing": 0.050},
-            "Small / Community-Scale Advanced Manufacturing": {"capex": 20, "const": 60, "direct": 40, "indirect": 35, "induced": 20, "tax": 200000, "retail": 8, "housing": 0.030},
-            "Medium / Regional-Scale Advanced Manufacturing": {"capex": 85, "const": 250, "direct": 180, "indirect": 160, "induced": 85, "tax": 900000, "retail": 35, "housing": 0.075},
-            "Large / Enterprise Mega-Scale Advanced Manufacturing": {"capex": 400, "const": 1100, "direct": 600, "indirect": 550, "induced": 320, "tax": 3800000, "retail": 140, "housing": 0.140},
-            "Small / Community-Scale Tech / R&D Campus": {"capex": 12, "const": 35, "direct": 60, "indirect": 15, "induced": 45, "tax": 350000, "retail": 18, "housing": 0.040},
-            "Medium / Regional-Scale Tech / R&D Campus": {"capex": 80, "const": 220, "direct": 300, "indirect": 80, "induced": 240, "tax": 1600000, "retail": 90, "housing": 0.110},
-            "Large / Enterprise Mega-Scale Tech / R&D Campus": {"capex": 300, "const": 850, "direct": 950, "indirect": 260, "induced": 750, "tax": 5500000, "retail": 280, "housing": 0.210}
-        }
-        
-        tot_capex, tot_const, tot_direct, tot_indirect, tot_induced, tot_tax, tot_retail, tot_housing_pct = 0, 0, 0, 0, 0, 0, 0, 0.0
+        dream_flags = []
+        stretch_flags = []
         
         for anchor_name in current_mods:
+            # Check feasibility for warnings
+            if ("Mega-Scale" in anchor_name or "High-Speed Rail" in anchor_name) and base_j < 1500:
+                dream_flags.append(anchor_name)
+            elif ("Regional" in anchor_name or "BRT" in anchor_name) and base_j < 500:
+                stretch_flags.append(anchor_name)
+
             if anchor_name in io_matrix:
+                if "Transit" in anchor_name or "BRT" in anchor_name or "Complete Streets" in anchor_name or "Freight" in anchor_name: has_transit = True
+                elif "Campus" in anchor_name or "Hospital" in anchor_name or "Hub" in anchor_name: has_commercial = True
+
                 d = io_matrix[anchor_name]
-                
-                # Feasibility Grading Overlay
-                if "Mega-Scale" in anchor_name and base_j < 1000: grade = "🟣 Dream Scenario"
-                elif "Regional" in anchor_name and base_j < 500: grade = "🟡 Stretch Goal"
-                else: grade = "🟢 Plausible/Likely"
-                st.caption(f"**{anchor_name}** — AI Feasibility: {grade}")
-                
                 tot_capex += d["capex"]; tot_const += d["const"]; tot_direct += d["direct"]
                 tot_indirect += d["indirect"]; tot_induced += d["induced"]; tot_tax += d["tax"]
                 tot_retail += d["retail"]; tot_housing_pct += d["housing"]
-                
-        local_capture, halo_capture = 0.40, 0.60
-        primary_indirect, primary_induced, primary_retail = tot_indirect * local_capture, tot_induced * local_capture, tot_retail * local_capture
-        primary_jobs_created = tot_direct + primary_indirect + primary_induced + primary_retail
-        primary_proj_jobs = base_j + primary_jobs_created
-        primary_proj_val = base_val * (1 + tot_housing_pct)
-        
-        halo_indirect, halo_induced, halo_retail = tot_indirect * halo_capture, tot_induced * halo_capture, tot_retail * halo_capture
-        halo_total_jobs = halo_indirect + halo_induced + halo_retail
-        halo_tax = tot_tax * 0.35 
-        
-        t1, t2, t3 = st.tabs(["📍 Local Host Impact", "🌊 Regional Halo Impact", "⏳ Temporal Impact Horizon (Time Dilation)"])
-        
-        with t1:
-            d1, d2, d3, d4 = st.columns(4)
-            d1.metric("Est. Capital Investment (CapEx)", f"${tot_capex:,}M")
-            d2.metric("Total Local Jobs (I-O)", f"{int(primary_proj_jobs):,}", delta=f"+{int(primary_jobs_created)} net local lift")
-            d3.metric("Host Municipal Tax Lift", f"${tot_tax:,.0f}")
-            d4.metric("Est. Host Median Home Value", f"${int(primary_proj_val):,}", delta=f"${int(primary_proj_val - base_val):+,} ({tot_housing_pct*100:+.1f}%)")
+
+        # Render Exception Warnings only if they exist
+        if dream_flags or stretch_flags:
+            st.markdown("#### ⚠️ Deployment Feasibility Alerts")
+            if dream_flags:
+                st.error(f"**🟣 Dream Scenario (Low probability without extreme zoning overrides):** {', '.join(dream_flags)}")
+            if stretch_flags:
+                st.warning(f"**🟡 Stretch Goal (Requires aggressive tax incentives):** {', '.join(stretch_flags)}")
+    
+    # --- SYNERGY MULTIPLIER (Transit-Oriented Development Boost) ---
+    synergy_active = has_commercial and has_transit
+    synergy_multiplier = 1.25 if synergy_active else 1.0
+
+    if synergy_active:
+        st.success("🚆 **Transit-Oriented Development (TOD) Synergy Activated!** By combining commercial anchors with advanced transportation, the labor pool and foot traffic multiplier expands by 25%.")
+
+    tot_direct = int(tot_direct * synergy_multiplier)
+    tot_indirect = int(tot_indirect * synergy_multiplier)
+    tot_induced = int(tot_induced * synergy_multiplier)
+    tot_retail = int(tot_retail * synergy_multiplier)
+    tot_tax = int(tot_tax * synergy_multiplier)
+    tot_housing_pct = tot_housing_pct * synergy_multiplier
             
-        with t2:
+    local_capture, halo_capture = 0.40, 0.60
+    primary_indirect, primary_induced, primary_retail = tot_indirect * local_capture, tot_induced * local_capture, tot_retail * local_capture
+    primary_jobs_created = tot_direct + primary_indirect + primary_induced + primary_retail
+    primary_proj_jobs = base_j + primary_jobs_created
+    primary_proj_val = base_val * (1 + tot_housing_pct)
+    
+    halo_indirect, halo_induced, halo_retail = tot_indirect * halo_capture, tot_induced * halo_capture, tot_retail * halo_capture
+    halo_total_jobs = halo_indirect + halo_induced + halo_retail
+    halo_tax = tot_tax * 0.35 
+    
+    t1, t2, t3 = st.tabs(["📍 Local Host Impact", "🌊 Regional Halo Impact", "⏳ Temporal Impact Horizon (Time Dilation)"])
+    
+    with t1:
+        d1, d2, d3, d4 = st.columns(4)
+        d1.metric("Est. Capital Investment (CapEx)", f"${tot_capex:,}M")
+        d2.metric("Total Local Jobs (I-O)", f"{int(primary_proj_jobs):,}", delta=f"+{int(primary_jobs_created)} net local lift")
+        d3.metric("Host Municipal Tax Lift", f"${tot_tax:,.0f}")
+        d4.metric("Est. Host Median Home Value", f"${int(primary_proj_val):,}", delta=f"${int(primary_proj_val - base_val):+,} ({tot_housing_pct*100:+.1f}%)")
+        
+    with t2:
+        if current_mods:
             st.info(f"Economic effects radiate to **{len(spillover_geoids)}** neighboring tracts in a {round(halo_radius_m/1609.34, 1)}-mile radius (dashed blue on map).")
-            h1, h2, h3, h4 = st.columns(4)
-            h1.metric("Spillover Job Creation", f"+{int(halo_total_jobs)} jobs")
-            h2.metric("Halo Retail/Dining Lift", f"+{int(halo_retail)} service jobs")
-            h3.metric("Halo Municipal Tax Lift", f"+${halo_tax:,.0f}")
-            h4.metric("Secondary Housing Bump", f"+{tot_housing_pct*100*0.35:.1f}% avg lift")
-            
-        with t3:
-            st.markdown("Economic impacts do not materialize instantly. Below is the probabilistic realization timeframe:")
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.markdown("#### Phase 1: Years 0 - 2")
-                st.markdown(f"- **Construction Jobs:** {tot_const:,} (Peak)")
-                st.markdown(f"- **CapEx Deployed:** ${tot_capex}M")
-                st.markdown("- **Operational Jobs:** 0")
-                st.markdown("- **Housing Impact:** Speculative bump (+1%)")
-            with c2:
-                st.markdown("#### Phase 2: Years 3 - 5")
-                st.markdown(f"- **Direct Hiring:** {tot_direct:,} jobs (Ramp-up)")
-                st.markdown(f"- **Tax Base:** 50% realization (${tot_tax * 0.5:,.0f})")
-                st.markdown(f"- **Halo Spillover:** Supply chains form.")
-                st.markdown(f"- **Housing Impact:** Accelerated growth.")
-            with c3:
-                st.markdown("#### Phase 3: Years 5 - 10+")
-                st.markdown(f"- **Full Stabilization:** {int(primary_jobs_created + halo_total_jobs):,} total regional jobs.")
-                st.markdown(f"- **Full Tax Yield:** ${tot_tax + halo_tax:,.0f} annually.")
-                st.markdown(f"- **Agglomeration:** Surrounding retail & services fully matured.")
+        else:
+            st.info("Deploy anchors to view regional spatial spillovers.")
+        h1, h2, h3, h4 = st.columns(4)
+        h1.metric("Spillover Job Creation", f"+{int(halo_total_jobs)} jobs")
+        h2.metric("Halo Retail/Dining Lift", f"+{int(halo_retail)} service jobs")
+        h3.metric("Halo Municipal Tax Lift", f"+${halo_tax:,.0f}")
+        h4.metric("Secondary Housing Bump", f"+{tot_housing_pct*100*0.35:.1f}% avg lift")
+        
+    with t3:
+        st.markdown("Economic impacts do not materialize instantly. Below is the probabilistic realization timeframe:")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown("#### Phase 1: Years 0 - 2")
+            st.markdown(f"- **Construction Jobs:** {tot_const:,} (Peak)")
+            st.markdown(f"- **CapEx Deployed:** ${tot_capex}M")
+            st.markdown("- **Operational Jobs:** 0")
+            st.markdown("- **Housing Impact:** Speculative bump (+1%)")
+        with c2:
+            st.markdown("#### Phase 2: Years 3 - 5")
+            st.markdown(f"- **Direct Hiring:** {tot_direct:,} jobs (Ramp-up)")
+            st.markdown(f"- **Tax Base:** 50% realization (${tot_tax * 0.5:,.0f})")
+            st.markdown(f"- **Halo Spillover:** Supply chains form.")
+            st.markdown(f"- **Housing Impact:** Accelerated growth.")
+        with c3:
+            st.markdown("#### Phase 3: Years 5 - 10+")
+            st.markdown(f"- **Full Stabilization:** {int(primary_jobs_created + halo_total_jobs):,} total regional jobs.")
+            st.markdown(f"- **Full Tax Yield:** ${tot_tax + halo_tax:,.0f} annually.")
+            st.markdown(f"- **Agglomeration:** Surrounding retail & services fully matured.")
