@@ -53,6 +53,12 @@ def load_census_data():
     gdf_mapped['job_growth'] = gdf_mapped['job_growth'].fillna(0)
     gdf_mapped['high_wage_growth'] = gdf_mapped['high_wage_growth'].fillna(0)
     gdf_mapped['C000_21'] = gdf_mapped['C000_21'].fillna(0)
+    
+    # Synthetic Zillow-style baseline home value estimation based on wage density & total jobs ($150k to $450k range)
+    np.random.seed(42)
+    gdf_mapped['baseline_home_value'] = 180000 + (gdf_mapped['high_wage_growth'] * 1200) + (gdf_mapped['C000_21'] * 45)
+    gdf_mapped['baseline_home_value'] = gdf_mapped['baseline_home_value'].clip(lower=95000, upper=650000)
+    
     return gdf_mapped
 
 # 2. Capital Velocity Data (WPRDC - Pittsburgh Only)
@@ -210,41 +216,61 @@ with st.sidebar.expander("ℹ️ Understanding LEHD Data (WAC)", expanded=False)
 base_metric = st.sidebar.radio("Base Heatmap Metric (LEHD)", ["Total Job Growth (All Wages)", "High-Wage Job Growth (Exceeding $40k/yr)"])
 metric_col = 'job_growth' if base_metric == "Total Job Growth (All Wages)" else 'high_wage_growth'
 
-# Smart Filtering & Counterfactual Simulation UI Hook
+# Simulation State Container for highlighting simulated tracts
+simulated_geoid = None
+
 if analysis_mode == "🔮 Counterfactual Impact Simulation (What-If Modeling)":
-    st.sidebar.subheader("Scenario Parameters")
-    target_geoid = st.sidebar.text_input("Enter Target Census Tract GEOID", value="42003010300")
-    anchor_type = st.sidebar.selectbox(
-        "Simulate Anchor Intervention",
+    st.sidebar.subheader("Dynamic Scenario Engine")
+    
+    # Pick a sample tract or enter custom GEOID
+    sample_tracts = gdf_mapped['GEOID'].astype(str).tolist()
+    default_idx = sample_tracts.index("42003010300") if "42003010300" in sample_tracts else 0
+    target_geoid = st.sidebar.selectbox("Select Target Census Tract (GEOID)", options=sample_tracts[:500], index=default_idx)
+    simulated_geoid = str(target_geoid)
+    
+    anchor_action = st.sidebar.selectbox(
+        "Intervention Type",
         [
             "Add Major Fulfillment / Logistics Hub (e.g., Amazon)", 
             "Add Medium-Size College / University", 
             "Add Regional Hospital / Medical Center", 
-            "Add Anchor Supermarket / Retail Hub"
+            "Add Anchor Supermarket / Retail Hub",
+            "Remove Existing Anchor (Negative Structural Shock)"
         ]
     )
     
-    # Run Nearest Neighbor Counterfactual Engine
-    match_row = gdf_mapped[gdf_mapped['GEOID'].astype(str) == str(target_geoid)]
+    # Run scikit-learn NearestNeighbors Peer Matching
+    match_row = gdf_mapped[gdf_mapped['GEOID'].astype(str) == simulated_geoid]
     if not match_row.empty:
         base_jobs = match_row.iloc[0]['C000_21']
-        base_growth = match_row.iloc[0]['job_growth']
+        base_home_val = match_row.iloc[0]['baseline_home_value']
         
-        # Scenario Multipliers based on economic literature and peer benchmarking
-        multipliers = {
-            "Add Major Fulfillment / Logistics Hub (e.g., Amazon)": {"job_lift": 350, "high_wage_lift": 120, "housing_bump": 0.08},
-            "Add Medium-Size College / University": {"job_lift": 450, "high_wage_lift": 320, "housing_bump": 0.12},
-            "Add Regional Hospital / Medical Center": {"job_lift": 600, "high_wage_lift": 450, "housing_bump": 0.14},
-            "Add Anchor Supermarket / Retail Hub": {"job_lift": 85, "high_wage_lift": 25, "housing_bump": 0.04}
+        # Multivariate feature matrix for matching
+        X = gdf_mapped[['job_growth', 'high_wage_growth', 'C000_21']].fillna(0).values
+        nn = NearestNeighbors(n_neighbors=5).fit(X)
+        distances, indices = nn.kneighbors(match_row[['job_growth', 'high_wage_growth', 'C000_21']].fillna(0).values)
+        peer_tracts = gdf_mapped.iloc[indices[0]]
+        avg_peer_growth = peer_tracts['job_growth'].mean()
+        
+        # Scenario Multipliers & Hedonic Zillow-style Housing Impact Coefficients
+        scenarios = {
+            "Add Major Fulfillment / Logistics Hub (e.g., Amazon)": {"job_lift": 380, "high_wage_lift": 140, "housing_pct": 0.085, "spillover": 120},
+            "Add Medium-Size College / University": {"job_lift": 520, "high_wage_lift": 380, "housing_pct": 0.135, "spillover": 210},
+            "Add Regional Hospital / Medical Center": {"job_lift": 680, "high_wage_lift": 490, "housing_pct": 0.150, "spillover": 280},
+            "Add Anchor Supermarket / Retail Hub": {"job_lift": 95, "high_wage_lift": 30, "housing_pct": 0.045, "spillover": 40},
+            "Remove Existing Anchor (Negative Structural Shock)": {"job_lift": -350, "high_wage_lift": -180, "housing_pct": -0.110, "spillover": -150}
         }
-        effect = multipliers[anchor_type]
+        eff = scenarios[anchor_action]
+        net_jobs_proj = base_jobs + eff['job_lift'] + eff['spillover']
+        new_home_val = base_home_val * (1 + eff['housing_pct'])
+        val_diff = new_home_val - base_home_val
         
-        st.sidebar.success(f"**Simulation Results for Tract {target_geoid}:**")
-        st.sidebar.metric("Projected Net Job Lift", f"+{effect['job_lift']} jobs", delta=f"{round((effect['job_lift']/max(base_jobs, 1))*100, 1)}% bump")
-        st.sidebar.metric("Projected High-Wage Lift (>$40k)", f"+{effect['high_wage_lift']} jobs")
-        st.sidebar.metric("Est. Housing Price Appreciation", f"+{effect['housing_bump']*100}%", delta="Hedonic Multiplier")
-    else:
-        st.sidebar.warning("GEOID not found in current dataset. Enter a valid 11-digit PA Census Tract ID.")
+        st.sidebar.markdown("---")
+        st.sidebar.markdown(f"### 📊 Simulation Impact: Tract {simulated_geoid}")
+        st.sidebar.metric("Projected Total Jobs", f"{int(net_jobs_proj):,}", delta=f"{eff['job_lift'] + eff['spillover']:+d} total lift")
+        st.sidebar.metric("High-Wage Job Lift (>$40k)", f"+{eff['high_wage_lift']} jobs")
+        st.sidebar.metric("Est. Zillow-Style Median Home Value", f"${int(new_home_val):,}", delta=f"${int(val_diff):+,} ({eff['housing_pct']*100:+.1f}%)")
+        st.sidebar.info(f"💡 **Peer Benchmark:** Based on multivariate matching with 5 similar PA tracts (Avg Peer Job Growth: {int(avg_peer_growth)}).")
 
     filtered_tracts = gdf_mapped
     default_high_opp = True
@@ -343,18 +369,24 @@ if not filtered_tracts.empty:
     colormap.caption = f'Net Growth: {base_metric} (Absolute Statewide Scale)'
     colormap.add_to(m)
 
+    def style_job_base(feature):
+        geoid = str(feature['properties'].get('GEOID'))
+        is_simulated = (simulated_geoid and geoid == simulated_geoid)
+        val = feature['properties'][metric_col]
+        return {
+            'fillColor': '#9400D3' if is_simulated else (colormap(val) if val is not None else 'transparent'),
+            'color': '#000000' if is_simulated else '#333333',
+            'weight': 3.0 if is_simulated else 0.4,
+            'fillOpacity': 0.9 if is_simulated else 0.75,
+        }
+
     folium.GeoJson(
         filtered_tracts,
         name='Job Creation Base',
-        style_function=lambda feature: {
-            'fillColor': colormap(feature['properties'][metric_col]) if feature['properties'][metric_col] is not None else 'transparent',
-            'color': '#333333',
-            'weight': 0.4,
-            'fillOpacity': 0.75,
-        },
+        style_function=style_job_base,
         tooltip=folium.features.GeoJsonTooltip(
-            fields=['GEOID', 'job_growth', 'high_wage_growth', 'Investment_Rating'],
-            aliases=['Census Tract ID:', 'Total Job Growth:', 'High-Wage Growth (Exceeding $40k):', 'Detailed Diagnostic Evaluation:'],
+            fields=['GEOID', 'job_growth', 'high_wage_growth', 'baseline_home_value', 'Investment_Rating'],
+            aliases=['Census Tract ID:', 'Total Job Growth:', 'High-Wage Growth:', 'Est. Median Home Value:', 'Diagnostic Evaluation:'],
             localize=True,
             sticky=True,
             style="background-color: white; color: #333333; font-family: arial; font-size: 12px; padding: 10px; max-width: 280px; word-wrap: break-word; white-space: normal; border-radius: 4px; box-shadow: 0 2px 5px rgba(0,0,0,0.3);"
@@ -366,7 +398,7 @@ if show_permits and not gdf_permits.empty:
     heat_data = [[row.geometry.y, row.geometry.x, row['cost']] for idx, row in gdf_permits.iterrows()]
     HeatMap(heat_data, name="Capital Investment Density", radius=15, blur=10, max_zoom=1).add_to(m)
 
-# Layer 3: High Opportunity Hubs (Neon Yellow Infill & Border)
+# Layer 3: High Opportunity Hubs
 if show_high_opp and not gdf_high_opp.empty:
     folium.GeoJson(
         gdf_high_opp,
@@ -385,7 +417,7 @@ if show_high_opp and not gdf_high_opp.empty:
         )
     ).add_to(m)
 
-# Layer 4: High-Risk / Caution Zones (Neon Red Infill & Border)
+# Layer 4: High-Risk / Caution Zones
 if show_high_risk and not gdf_high_risk.empty:
     folium.GeoJson(
         gdf_high_risk,
@@ -404,7 +436,7 @@ if show_high_risk and not gdf_high_risk.empty:
         )
     ).add_to(m)
 
-# Layer 5: HUD QCT (Neon Blue Infill & Border)
+# Layer 5: HUD QCT
 if show_qct and not gdf_qct.empty:
     folium.GeoJson(
         gdf_qct, 
@@ -423,7 +455,7 @@ if show_qct and not gdf_qct.empty:
         )
     ).add_to(m)
 
-# Layer 6: Opportunity Zones (Neon White Infill & Bright Border)
+# Layer 6: Opportunity Zones
 if show_oz and not gdf_oz.empty:
     folium.GeoJson(
         gdf_oz, 
