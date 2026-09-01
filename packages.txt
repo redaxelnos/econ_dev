@@ -1,0 +1,3 @@
+libspatialindex-dev
+gdal-bin
+libgdal-dev
