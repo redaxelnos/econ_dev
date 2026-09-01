@@ -18,8 +18,8 @@ st.title("Pennsylvania Economic & Infrastructure Gap Analysis")
 # --- SESSION STATE INITIALIZATION ---
 if "selected_geoid" not in st.session_state:
     st.session_state.selected_geoid = "42003010300"  # Default Pittsburgh sample tract
-if "deployed_anchors" not in st.session_state:
-    st.session_state.deployed_anchors = {}  # Format: {geoid: [anchor_name_1, anchor_name_2]}
+if "tract_modifications" not in st.session_state:
+    st.session_state.tract_modifications = {}  # Format: {geoid: {'added': [...], 'removed': [...]}}
 
 # --- REGION SELECTOR CONFIGURATION ---
 REGIONS = {
@@ -152,6 +152,22 @@ with st.spinner(f"Loading {selected_region} Data..."):
     gdf_infra = load_osm_data(selected_region)
     gdf_permits = load_permit_data() if selected_region == "Pittsburgh" else gpd.GeoDataFrame()
 
+# --- SPATIAL INFRASTRUCTURE MATCHING (Detecting what's already there) ---
+tract_detected_features = {}
+if not gdf_infra.empty and 'GEOID' in gdf_mapped.columns:
+    try:
+        infra_proj = gdf_infra.to_crs(gdf_mapped.crs)
+        joined = gpd.sjoin(infra_proj, gdf_mapped[['GEOID', 'geometry']], how='inner', predicate='within')
+        for geoid, group in joined.groupby('GEOID'):
+            amenities = []
+            for _, row in group.iterrows():
+                val = row.get('amenity') or row.get('shop') or row.get('public_transport')
+                if pd.notna(val):
+                    amenities.append(str(val))
+            tract_detected_features[str(geoid)] = list(set(amenities))
+    except Exception:
+        pass
+
 # --- PRECISE DIAGNOSTIC EVALUATION ---
 if not gdf_qct.empty and 'GEOID' in gdf_qct.columns:
     qct_ids = set(gdf_qct['GEOID'].astype(str))
@@ -223,42 +239,8 @@ with st.sidebar.expander("ℹ️ Understanding LEHD Data (WAC)", expanded=False)
 base_metric = st.sidebar.radio("Base Heatmap Metric (LEHD)", ["Total Job Growth (All Wages)", "High-Wage Job Growth (Exceeding $40k/yr)"])
 metric_col = 'job_growth' if base_metric == "Total Job Growth (All Wages)" else 'high_wage_growth'
 
-# Simulation Controls with Sizing Tiers
-if analysis_mode == "🔮 Counterfactual Impact Simulation (What-If Modeling)":
-    st.sidebar.subheader("🎯 Active Simulation Target")
-    st.sidebar.info(f"Selected Census Tract: **{st.session_state.selected_geoid}**\n*(Tip: Click any tract directly on the map to switch targets)*")
-    
-    anchor_type = st.sidebar.selectbox(
-        "Anchor Category",
-        ["Hospital / Medical Center", "Grocery Store / Supermarket", "College / University", "Fulfillment / Logistics Hub"]
-    )
-    
-    anchor_size = st.sidebar.selectbox(
-        "Scale & Size Tier",
-        ["Small / Community-Scale", "Medium / Regional-Scale", "Large / Enterprise Mega-Scale"]
-    )
-    
-    deployment_key = f"{anchor_size} {anchor_type}"
-    
-    col_deploy, col_clear = st.sidebar.columns(2)
-    if col_deploy.button("🚀 Deploy Anchor"):
-        if st.session_state.selected_geoid not in st.session_state.deployed_anchors:
-            st.session_state.deployed_anchors[st.session_state.selected_geoid] = []
-        st.session_state.deployed_anchors[st.session_state.selected_geoid].append(deployment_key)
-        st.sidebar.success(f"Deployed!")
-        
-    if col_clear.button("🗑️ Clear Deployed"):
-        if st.session_state.selected_geoid in st.session_state.deployed_anchors:
-            del st.session_state.deployed_anchors[st.session_state.selected_geoid]
-        st.sidebar.warning("Cleared.")
-
-    filtered_tracts = gdf_mapped
-    default_high_opp = True
-    default_high_risk = True
-    default_qct = True
-    default_oz = True
-
-elif analysis_mode == "⚠️ Severely Disadvantaged & High-Need Focus (Critical Intervention)":
+# Filtering logic based on Analysis Focus Mode
+if analysis_mode == "⚠️ Severely Disadvantaged & High-Need Focus (Critical Intervention)":
     filtered_tracts = gdf_mapped[gdf_mapped['job_growth'] <= -30]
     st.sidebar.error("Showing *only* severely disadvantaged tracts experiencing severe job contraction (net loss of 30+ jobs).")
     default_high_opp = False
@@ -303,15 +285,6 @@ else:
 
 st.sidebar.markdown("---")
 st.sidebar.header("Policy & Opportunity Boundaries")
-with st.sidebar.expander("ℹ️ Complete Statutory & Algorithmic Makeup", expanded=False):
-    st.markdown("""
-    - **Severely Disadvantaged Zones (Crimson):** Tracts experiencing severe job hemorrhage (loss of 30+ jobs). Requires emergency structural intervention.
-    - **High Opportunity Hubs (Neon Yellow):** Non-distressed tracts where high-wage expansion exceeds the regional 75th percentile. Framed for private investment scaling.
-    - **High-Risk / Caution Zones (Neon Red):** Distressed tracts experiencing net job decline (less than -10 jobs). Flags structural headwinds where tax incentives alone historically fail.
-    - **HUD QCT (Neon Blue):** Statutory low-income tracts (50%+ households under 60% AMGI or 25%+ poverty). Unlocks LIHTC 30% basis boosts.
-    - **Opportunity Zones (Neon White):** Treasury-certified low-income communities designated for capital gains tax deferment benefits.
-    """)
-
 show_high_opp = st.sidebar.checkbox("High Opportunity Hubs - Neon Yellow Infill", value=default_high_opp)
 show_high_risk = st.sidebar.checkbox("High-Risk / Caution Zones - Neon Red Infill", value=default_high_risk)
 show_qct = st.sidebar.checkbox("Distressed Areas (HUD QCT) - Neon Blue Infill", value=default_qct)
@@ -352,9 +325,9 @@ if not filtered_tracts.empty:
     def style_job_base(feature):
         geoid = str(feature['properties'].get('GEOID'))
         is_selected = (geoid == st.session_state.selected_geoid)
-        has_anchor = geoid in st.session_state.deployed_anchors and len(st.session_state.deployed_anchors[geoid]) > 0
+        has_mod = geoid in st.session_state.tract_modifications and len(st.session_state.tract_modifications[geoid]) > 0
         
-        if has_anchor:
+        if has_mod:
             return {'fillColor': '#00FF00', 'color': '#000000', 'weight': 3.0, 'fillOpacity': 0.85}
         elif is_selected:
             return {'fillColor': '#9400D3', 'color': '#000000', 'weight': 3.0, 'fillOpacity': 0.85}
@@ -380,16 +353,17 @@ if not filtered_tracts.empty:
         )
     ).add_to(m)
 
-# Render Deployed Simulation Anchors on Map
-for geoid, anchors in st.session_state.deployed_anchors.items():
-    tract_geom = gdf_mapped[gdf_mapped['GEOID'].astype(str) == geoid]
-    if not tract_geom.empty:
-        centroid = tract_geom.geometry.centroid.iloc[0]
-        folium.Marker(
-            location=[centroid.y, centroid.x],
-            popup=f"Tract {geoid}: Deployed Anchors -> {', '.join(anchors)}",
-            icon=folium.Icon(color='purple', icon='industry', prefix='fa')
-        ).add_to(m)
+# Render Modified Tracts on Map
+for geoid, mods in st.session_state.tract_modifications.items():
+    if mods:
+        tract_geom = gdf_mapped[gdf_mapped['GEOID'].astype(str) == geoid]
+        if not tract_geom.empty:
+            centroid = tract_geom.geometry.centroid.iloc[0]
+            folium.Marker(
+                location=[centroid.y, centroid.x],
+                popup=f"Tract {geoid}: Modifications -> {', '.join(mods)}",
+                icon=folium.Icon(color='purple', icon='industry', prefix='fa')
+            ).add_to(m)
 
 # Layer 2: Permit Capital Density Heatmap
 if show_permits and not gdf_permits.empty:
@@ -488,8 +462,8 @@ if not filtered_infra.empty:
 
 folium.LayerControl(collapsed=False).add_to(m)
 
-# Capture Map Clicks for Interactive Simulation
-map_output = st_folium(m, use_container_width=True, returned_objects=['last_clicked'], height=700)
+# --- CAPTURE MAP CLICKS ---
+map_output = st_folium(m, use_container_width=True, returned_objects=['last_clicked'], height=600)
 
 if map_output and map_output.get('last_clicked'):
     click_lat = map_output['last_clicked']['lat']
@@ -503,54 +477,140 @@ if map_output and map_output.get('last_clicked'):
             st.session_state.selected_geoid = clicked_geoid
             st.rerun()
 
-# Display Simulation Impact Panel with Granular Sizing Multipliers
-if st.session_state.selected_geoid in st.session_state.deployed_anchors:
-    active_tract = gdf_mapped[gdf_mapped['GEOID'].astype(str) == st.session_state.selected_geoid]
-    if not active_tract.empty:
-        base_j = active_tract.iloc[0]['C000_21']
-        base_val = active_tract.iloc[0]['baseline_home_value']
+# ==========================================
+# --- INTERACTIVE TRACT INSPECTOR (BELOW MAP) ---
+# ==========================================
+st.markdown("---")
+st.markdown(f"### 📍 Interactive Tract Inspector & Feature Toggle Panel (Selected Tract: `{st.session_state.selected_geoid}`)")
+
+selected_row = gdf_mapped[gdf_mapped['GEOID'].astype(str) == st.session_state.selected_geoid]
+
+if not selected_row.empty:
+    row_data = selected_row.iloc[0]
+    
+    # Detect what features already exist here via OSM spatial join
+    detected_features = tract_detected_features.get(st.session_state.selected_geoid, [])
+    
+    col_info, col_controls = st.columns([1, 1.2])
+    
+    with col_info:
+        st.markdown("#### 📋 Baseline Tract Diagnostics")
+        st.write(f"- **Census GEOID:** `{st.session_state.selected_geoid}`")
+        st.write(f"- **Baseline Workplace Jobs:** `{int(row_data['C000_21']):,}`")
+        st.write(f"- **Historical Job Growth (16-21):** `{int(row_data['job_growth']):+d}`")
+        st.write(f"- **Est. Baseline Home Value:** `${int(row_data['baseline_home_value']):,}`")
+        st.markdown(f"**🔍 Detected Existing Infrastructure (OSM):**")
+        if detected_features:
+            for feat in detected_features:
+                st.markdown(f"- ✅ Detected: `{feat.title()}`")
+        else:
+            st.markdown("- *No major commercial anchors detected via OSM in this specific block.*")
+
+    with col_controls:
+        st.markdown("#### 🛠️ Add / Subtract Features & Infrastructure")
+        st.markdown("Toggle or add economic anchors to simulate structural changes for this tract:")
         
-        total_job_lift = 0
-        total_hw_lift = 0
-        total_housing_pct = 0.0
-        
-        # Granular Multiplier Dictionary for Sizes & Types
-        multiplier_matrix = {
-            "Small / Community-Scale Hospital / Medical Center": {"jobs": 60, "hw": 40, "housing": 0.025},
-            "Medium / Regional-Scale Hospital / Medical Center": {"jobs": 310, "hw": 220, "housing": 0.080},
-            "Large / Enterprise Mega-Scale Hospital / Medical Center": {"jobs": 720, "hw": 520, "housing": 0.160},
+        # Initialize modifications list for this tract in session state
+        if st.session_state.selected_geoid not in st.session_state.tract_modifications:
+            st.session_state.tract_modifications[st.session_state.selected_geoid] = []
             
-            "Small / Community-Scale Grocery Store / Supermarket": {"jobs": 30, "hw": 10, "housing": 0.015},
-            "Medium / Regional-Scale Grocery Store / Supermarket": {"jobs": 95, "hw": 30, "housing": 0.045},
-            "Large / Enterprise Mega-Scale Grocery Store / Supermarket": {"jobs": 220, "hw": 70, "housing": 0.075},
+        current_mods = st.session_state.tract_modifications[st.session_state.selected_geoid]
+        
+        feature_options = [
+            "Small / Community-Scale Hospital / Medical Center",
+            "Medium / Regional-Scale Hospital / Medical Center",
+            "Large / Enterprise Mega-Scale Hospital / Medical Center",
+            "Small / Community-Scale Grocery Store / Supermarket",
+            "Medium / Regional-Scale Grocery Store / Supermarket",
+            "Large / Enterprise Mega-Scale Grocery Store / Supermarket",
+            "Small / Community-Scale College / University",
+            "Medium / Regional-Scale College / University",
+            "Large / Enterprise Mega-Scale College / University",
+            "Small / Community-Scale Fulfillment / Logistics Hub",
+            "Medium / Regional-Scale Fulfillment / Logistics Hub",
+            "Large / Enterprise Mega-Scale Fulfillment / Logistics Hub"
+        ]
+        
+        selected_adds = st.multiselect(
+            "Select Anchors to Deploy / Simulate:",
+            options=feature_options,
+            default=current_mods
+        )
+        
+        st.session_state.tract_modifications[st.session_state.selected_geoid] = selected_adds
+
+    # ==========================================
+    # --- DYNAMIC I-O IMPACT & FISCAL DASHBOARD ---
+    # ==========================================
+    st.markdown("---")
+    st.markdown("### 📊 Recalculated Input-Output (I-O) Economic Impact & Fiscal Dashboard")
+    
+    base_j = row_data['C000_21']
+    base_val = row_data['baseline_home_value']
+    
+    io_matrix = {
+        "Small / Community-Scale Hospital / Medical Center": {"capex": 15, "const": 45, "direct": 50, "indirect": 15, "induced": 20, "tax": 450000, "retail": 12, "housing": 0.025},
+        "Medium / Regional-Scale Hospital / Medical Center": {"capex": 150, "const": 400, "direct": 300, "indirect": 120, "induced": 150, "tax": 3500000, "retail": 75, "housing": 0.080},
+        "Large / Enterprise Mega-Scale Hospital / Medical Center": {"capex": 500, "const": 1400, "direct": 700, "indirect": 350, "induced": 420, "tax": 12000000, "retail": 190, "housing": 0.160},
+        
+        "Small / Community-Scale Grocery Store / Supermarket": {"capex": 2, "const": 10, "direct": 25, "indirect": 6, "induced": 10, "tax": 60000, "retail": 5, "housing": 0.015},
+        "Medium / Regional-Scale Grocery Store / Supermarket": {"capex": 18, "const": 50, "direct": 90, "indirect": 28, "induced": 35, "tax": 280000, "retail": 22, "housing": 0.045},
+        "Large / Enterprise Mega-Scale Grocery Store / Supermarket": {"capex": 45, "const": 120, "direct": 210, "indirect": 75, "induced": 85, "tax": 750000, "retail": 55, "housing": 0.075},
+        
+        "Small / Community-Scale College / University": {"capex": 40, "const": 110, "direct": 120, "indirect": 45, "induced": 70, "tax": 150000, "retail": 40, "housing": 0.050},
+        "Medium / Regional-Scale College / University": {"capex": 180, "const": 500, "direct": 350, "indirect": 160, "induced": 240, "tax": 600000, "retail": 120, "housing": 0.100},
+        "Large / Enterprise Mega-Scale College / University": {"capex": 600, "const": 1800, "direct": 800, "indirect": 420, "induced": 650, "tax": 2200000, "retail": 320, "housing": 0.180},
+        
+        "Small / Community-Scale Fulfillment / Logistics Hub": {"capex": 25, "const": 70, "direct": 75, "indirect": 30, "induced": 25, "tax": 400000, "retail": 14, "housing": 0.020},
+        "Medium / Regional-Scale Fulfillment / Logistics Hub": {"capex": 120, "const": 350, "direct": 250, "indirect": 115, "induced": 90, "tax": 1800000, "retail": 50, "housing": 0.060},
+        "Large / Enterprise Mega-Scale Fulfillment / Logistics Hub": {"capex": 350, "const": 1000, "direct": 500, "indirect": 260, "induced": 190, "tax": 4500000, "retail": 110, "housing": 0.110}
+    }
+    
+    tot_capex = 0
+    tot_const = 0
+    tot_direct = 0
+    tot_indirect = 0
+    tot_induced = 0
+    tot_tax = 0
+    tot_retail = 0
+    tot_housing_pct = 0.0
+    
+    for anchor_name in current_mods:
+        if anchor_name in io_matrix:
+            d = io_matrix[anchor_name]
+            tot_capex += d["capex"]
+            tot_const += d["const"]
+            tot_direct += d["direct"]
+            tot_indirect += d["indirect"]
+            tot_induced += d["induced"]
+            tot_tax += d["tax"]
+            tot_retail += d["retail"]
+            tot_housing_pct += d["housing"]
             
-            "Small / Community-Scale College / University": {"jobs": 140, "hw": 100, "housing": 0.050},
-            "Medium / Regional-Scale College / University": {"jobs": 350, "hw": 260, "housing": 0.100},
-            "Large / Enterprise Mega-Scale College / University": {"jobs": 700, "hw": 520, "housing": 0.180},
-            
-            "Small / Community-Scale Fulfillment / Logistics Hub": {"jobs": 80, "hw": 25, "housing": 0.020},
-            "Medium / Regional-Scale Fulfillment / Logistics Hub": {"jobs": 240, "hw": 85, "housing": 0.060},
-            "Large / Enterprise Mega-Scale Fulfillment / Logistics Hub": {"jobs": 480, "hw": 160, "housing": 0.110}
-        }
-        
-        for anchor_name in st.session_state.deployed_anchors[st.session_state.selected_geoid]:
-            if anchor_name in multiplier_matrix:
-                m_data = multiplier_matrix[anchor_name]
-                total_job_lift += m_data["jobs"]
-                total_hw_lift += m_data["hw"]
-                total_housing_pct += m_data["housing"]
-                
-        proj_jobs = base_j + total_job_lift
-        proj_val = base_val * (1 + total_housing_pct)
-        
-        st.markdown("---")
-        st.subheader(f"📈 Real-Time Impact Dashboard for Active Tract: `{st.session_state.selected_geoid}`")
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Deployed Anchors", f"{len(st.session_state.deployed_anchors[st.session_state.selected_geoid])} active")
-        col2.metric("Projected Total Workplace Jobs", f"{int(proj_jobs):,}", delta=f"+{total_job_lift} lift")
-        col3.metric("Projected High-Wage Job Lift", f"+{total_hw_lift} jobs")
-        col4.metric("Est. Zillow-Style Median Home Value", f"${int(proj_val):,}", delta=f"${int(proj_val - base_val):+,} ({total_housing_pct*100:+.1f}%)")
-        
-        with st.expander("View Deployed Anchor Details"):
-            for a in st.session_state.deployed_anchors[st.session_state.selected_geoid]:
-                st.markdown(f"- {a}")
+    total_jobs_created = tot_direct + tot_indirect + tot_induced + tot_retail
+    proj_jobs = base_j + total_jobs_created
+    proj_val = base_val * (1 + tot_housing_pct)
+    
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("Est. Capital Investment (CapEx)", f"${tot_capex:,}M", delta=f"{tot_const:,} const. jobs")
+    d2.metric("Total Operational Jobs (I-O)", f"{int(proj_jobs):,}", delta=f"+{total_jobs_created} net lift")
+    d3.metric("Est. Annual Municipal Tax Lift", f"${tot_tax:,.0f}", delta="Property & Local Tax")
+    d4.metric("Est. Median Home Value (Zillow)", f"${int(proj_val):,}", delta=f"${int(proj_val - base_val):+,} ({tot_housing_pct*100:+.1f}%)")
+    
+    col_x, col_y, col_z = st.columns(3)
+    col_x.markdown(f"""
+    **Employment Breakdown (I-O Multiplier):**
+    - **Direct Operational Jobs:** `{tot_direct}`
+    - **Indirect (Supply Chain):** `{tot_indirect}`
+    - **Induced (Employee Spending):** `{tot_induced}`
+    """)
+    col_y.markdown(f"""
+    **Ancillary Trade Area Spillover:**
+    - **Net New Retail/Restaurant Jobs:** `+{tot_retail}`
+    - **Commercial Corridor Foot Traffic:** High Multiplier Expansion
+    """)
+    col_z.markdown(f"""
+    **Fiscal & Municipal Impact:**
+    - **Annual Tax Revenue Lift:** `${tot_tax:,.0f}`
+    - **Temporary Construction Payroll:** `~${tot_const * 65000:,.0f}`
+    """)
