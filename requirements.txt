@@ -6,4 +6,5 @@ folium
 requests
 numpy
 branca
+scikit-learn
 streamlit-folium
