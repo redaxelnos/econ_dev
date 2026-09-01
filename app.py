@@ -151,7 +151,7 @@ with st.spinner(f"Loading {selected_region} Data..."):
     gdf_infra = load_osm_data(selected_region)
     gdf_permits = load_permit_data() if selected_region == "Pittsburgh" else gpd.GeoDataFrame()
 
-# --- CACHED SPATIAL INFRASTRUCTURE MATCHING (Eliminates Lag) ---
+# --- CACHED SPATIAL INFRASTRUCTURE MATCHING ---
 @st.cache_data
 def get_detected_features(selected_region):
     tract_features = {}
@@ -540,13 +540,28 @@ if not selected_row.empty:
             "Large / Enterprise Mega-Scale Childcare Facility"
         ]
         
-        selected_adds = st.multiselect(
-            "Select Anchors to Deploy / Simulate:",
-            options=feature_options,
-            default=current_mods
-        )
-        
-        st.session_state.tract_modifications[st.session_state.selected_geoid] = selected_adds
+        # FORM WRAPPER: Batches multiselect inputs to prevent auto-refreshing lag
+        with st.form(key=f"sim_form_{st.session_state.selected_geoid}"):
+            st.info("Batch your selections below, then click 'Load Simulation' to calculate impacts.")
+            selected_adds = st.multiselect(
+                "Select Anchors to Deploy / Simulate:",
+                options=feature_options,
+                default=current_mods
+            )
+            
+            submit_col, clear_col = st.columns([1, 1])
+            with submit_col:
+                run_sim = st.form_submit_button("🚀 Load Simulation")
+            with clear_col:
+                clear_sim = st.form_submit_button("🗑️ Clear Tract")
+
+        if run_sim:
+            st.session_state.tract_modifications[st.session_state.selected_geoid] = selected_adds
+            st.rerun()
+            
+        if clear_sim:
+            st.session_state.tract_modifications[st.session_state.selected_geoid] = []
+            st.rerun()
 
     # ==========================================
     # --- DYNAMIC I-O IMPACT & FISCAL DASHBOARD ---
@@ -592,7 +607,10 @@ if not selected_row.empty:
     tot_retail = 0
     tot_housing_pct = 0.0
     
-    for anchor_name in current_mods:
+    # Read directly from session state so it only updates when the form is submitted
+    active_mods = st.session_state.tract_modifications.get(st.session_state.selected_geoid, [])
+    
+    for anchor_name in active_mods:
         if anchor_name in io_matrix:
             d = io_matrix[anchor_name]
             tot_capex += d["capex"]
