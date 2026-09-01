@@ -87,7 +87,7 @@ def load_osm_data(city_name):
     except Exception:
         return gpd.GeoDataFrame()
 
-# 4 & 5. Federal Boundaries with Pagination
+# 4 & 5. Federal Boundaries with Paginator to prevent record caps
 @st.cache_data
 def load_federal_boundaries(layer_type):
     url = "https://services6.arcgis.com/zDzo4EZXf1AjkPjO/ArcGIS/rest/services/Qualified_Census_Tracts_2025/FeatureServer/0/query" if layer_type == "QCT" else "https://services.arcgis.com/VTyQ9soqVukalItT/arcgis/rest/services/Opportunity_Zones/FeatureServer/0/query"
@@ -156,9 +156,8 @@ def evaluate_investment_risk(row):
     growth = row['job_growth']
     high_wage = row['high_wage_growth']
     
-    # Construct precise quantitative diagnostic string
     job_str = f"Net job change: {int(growth):+d}"
-    hw_str = f"High-wage (> $40k) change: {int(high_wage):+d} (Threshold: +{int(high_wage_threshold)})"
+    hw_str = f"High-Wage change: {int(high_wage):+d} (Threshold: +{int(high_wage_threshold)})"
     
     if is_distressed:
         if growth < -10:
@@ -182,18 +181,38 @@ gdf_high_risk = gdf_mapped[gdf_mapped['Investment_Rating'].str.contains("High-Ri
 
 # --- SIDEBAR CONTROLS ---
 st.sidebar.markdown("---")
-st.sidebar.header("Economic Vitality Layers")
-with st.sidebar.expander("ℹ️ Detailed Metric Makeup", expanded=False):
-    st.markdown("""
-    - **Total Job Growth:** Net change in all jobs (2016-2021) sourced from Census LEHD WAC data.
-    - **High-Wage Job Growth:** Isolates jobs earning >$40k/year (`CE03` tier). True indicator of sustainable regional wealth creation.
-    """)
+st.sidebar.header("Analysis Focus Mode")
+analysis_mode = st.sidebar.radio(
+    "Select Map Objective",
+    [
+        "Full Spectrum View (All Tracts)", 
+        "🚨 Turnaround & Intervention Target Focus (Declining/Distressed Only)",
+        "🌟 High-Growth Scaling Focus (Expansion Hubs Only)"
+    ]
+)
 
 base_metric = st.sidebar.radio("Base Heatmap Metric (LEHD)", ["Total Job Growth (All Wages)", "High-Wage Job Growth (>$40k/yr)"])
 metric_col = 'job_growth' if base_metric == "Total Job Growth (All Wages)" else 'high_wage_growth'
 
-min_growth = st.sidebar.slider("Minimum Job Growth Threshold", min_value=int(gdf_mapped[metric_col].min()), max_value=int(gdf_mapped[metric_col].max()), value=int(gdf_mapped[metric_col].min()), step=50)
-filtered_tracts = gdf_mapped[gdf_mapped[metric_col] >= min_growth]
+# Dynamic filtering based on Analysis Focus Mode
+if analysis_mode == "🚨 Turnaround & Intervention Target Focus (Declining/Distressed Only)":
+    filtered_tracts = gdf_mapped[
+        (gdf_mapped[metric_col] < 20) & 
+        (gdf_mapped['Investment_Rating'].str.contains("High-Risk|Distressed", na=False))
+    ]
+    st.sidebar.warning("Showing *only* distressed or declining tracts requiring capital intervention.")
+elif analysis_mode == "🌟 High-Growth Scaling Focus (Expansion Hubs Only)":
+    filtered_tracts = gdf_mapped[gdf_mapped['Investment_Rating'].str.contains("High Opportunity|High-Growth", na=False)]
+    st.sidebar.success("Showing *only* high-growth expansion and opportunity hubs.")
+else:
+    min_growth = st.sidebar.slider(
+        "Minimum Job Growth Threshold", 
+        min_value=int(gdf_mapped[metric_col].min()), 
+        max_value=int(gdf_mapped[metric_col].max()), 
+        value=int(gdf_mapped[metric_col].min()), 
+        step=50
+    )
+    filtered_tracts = gdf_mapped[gdf_mapped[metric_col] >= min_growth]
 
 if selected_region == "Pittsburgh":
     show_permits = st.sidebar.checkbox("Overlay Capital Investment Heatmap (WPRDC)", value=True)
@@ -356,9 +375,8 @@ if not filtered_infra.empty:
         folium.Marker(
             location=[row.geometry.y, row.geometry.x], 
             popup=row.get('name', category.title()),
-            icon=folium.Icon(color=color_map.get(category, 'black'), icon=icon_map.get(category, 'circle'), prefix='fa')
+            icon=folium.Icon(color=color_map.get(category, 'black'), icon=icon_map.get(category, 'icon'), prefix='fa')
         ).add_to(marker_cluster)
 
-# This automatically populates all layers into the map's interactive top-right layer control widget
 folium.LayerControl(collapsed=False).add_to(m)
 st_folium(m, use_container_width=True, returned_objects=[], height=700)
