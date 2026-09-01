@@ -19,7 +19,7 @@ st.title("Pennsylvania Economic & Infrastructure Gap Analysis")
 if "selected_geoid" not in st.session_state:
     st.session_state.selected_geoid = "42003010300"  # Default Pittsburgh sample tract
 if "tract_modifications" not in st.session_state:
-    st.session_state.tract_modifications = {}  # Format: {geoid: {'added': [...], 'removed': [...]}}
+    st.session_state.tract_modifications = {}  # Format: {geoid: [...]}
 
 # --- REGION SELECTOR CONFIGURATION ---
 REGIONS = {
@@ -61,7 +61,6 @@ def load_census_data():
     gdf_mapped['high_wage_growth'] = gdf_mapped['high_wage_growth'].fillna(0)
     gdf_mapped['C000_21'] = gdf_mapped['C000_21'].fillna(0)
     
-    # Synthetic Zillow-style baseline home value estimation
     np.random.seed(42)
     gdf_mapped['baseline_home_value'] = 180000 + (gdf_mapped['high_wage_growth'] * 1200) + (gdf_mapped['C000_21'] * 45)
     gdf_mapped['baseline_home_value'] = gdf_mapped['baseline_home_value'].clip(lower=95000, upper=650000)
@@ -152,9 +151,12 @@ with st.spinner(f"Loading {selected_region} Data..."):
     gdf_infra = load_osm_data(selected_region)
     gdf_permits = load_permit_data() if selected_region == "Pittsburgh" else gpd.GeoDataFrame()
 
-# --- SPATIAL INFRASTRUCTURE MATCHING (Detecting what's already there) ---
-tract_detected_features = {}
-if not gdf_infra.empty and 'GEOID' in gdf_mapped.columns:
+# --- CACHED SPATIAL INFRASTRUCTURE MATCHING (Eliminates Lag) ---
+@st.cache_data
+def get_detected_features(selected_region):
+    tract_features = {}
+    if selected_region == "Statewide View" or gdf_infra.empty:
+        return tract_features
     try:
         infra_proj = gdf_infra.to_crs(gdf_mapped.crs)
         joined = gpd.sjoin(infra_proj, gdf_mapped[['GEOID', 'geometry']], how='inner', predicate='within')
@@ -164,9 +166,12 @@ if not gdf_infra.empty and 'GEOID' in gdf_mapped.columns:
                 val = row.get('amenity') or row.get('shop') or row.get('public_transport')
                 if pd.notna(val):
                     amenities.append(str(val))
-            tract_detected_features[str(geoid)] = list(set(amenities))
+            tract_features[str(geoid)] = list(set(amenities))
     except Exception:
         pass
+    return tract_features
+
+tract_detected_features = get_detected_features(selected_region)
 
 # --- PRECISE DIAGNOSTIC EVALUATION ---
 if not gdf_qct.empty and 'GEOID' in gdf_qct.columns:
@@ -488,7 +493,6 @@ selected_row = gdf_mapped[gdf_mapped['GEOID'].astype(str) == st.session_state.se
 if not selected_row.empty:
     row_data = selected_row.iloc[0]
     
-    # Detect what features already exist here via OSM spatial join
     detected_features = tract_detected_features.get(st.session_state.selected_geoid, [])
     
     col_info, col_controls = st.columns([1, 1.2])
@@ -508,9 +512,8 @@ if not selected_row.empty:
 
     with col_controls:
         st.markdown("#### 🛠️ Add / Subtract Features & Infrastructure")
-        st.markdown("Toggle or add economic anchors to simulate structural changes for this tract:")
+        st.markdown("Toggle or add economic anchors (including Banks and Childcare) to simulate structural changes:")
         
-        # Initialize modifications list for this tract in session state
         if st.session_state.selected_geoid not in st.session_state.tract_modifications:
             st.session_state.tract_modifications[st.session_state.selected_geoid] = []
             
@@ -528,7 +531,13 @@ if not selected_row.empty:
             "Large / Enterprise Mega-Scale College / University",
             "Small / Community-Scale Fulfillment / Logistics Hub",
             "Medium / Regional-Scale Fulfillment / Logistics Hub",
-            "Large / Enterprise Mega-Scale Fulfillment / Logistics Hub"
+            "Large / Enterprise Mega-Scale Fulfillment / Logistics Hub",
+            "Small / Community-Scale Bank / Financial Institution",
+            "Medium / Regional-Scale Bank / Financial Institution",
+            "Large / Enterprise Mega-Scale Bank / Financial Institution",
+            "Small / Community-Scale Childcare Facility",
+            "Medium / Regional-Scale Childcare Facility",
+            "Large / Enterprise Mega-Scale Childcare Facility"
         ]
         
         selected_adds = st.multiselect(
@@ -563,7 +572,15 @@ if not selected_row.empty:
         
         "Small / Community-Scale Fulfillment / Logistics Hub": {"capex": 25, "const": 70, "direct": 75, "indirect": 30, "induced": 25, "tax": 400000, "retail": 14, "housing": 0.020},
         "Medium / Regional-Scale Fulfillment / Logistics Hub": {"capex": 120, "const": 350, "direct": 250, "indirect": 115, "induced": 90, "tax": 1800000, "retail": 50, "housing": 0.060},
-        "Large / Enterprise Mega-Scale Fulfillment / Logistics Hub": {"capex": 350, "const": 1000, "direct": 500, "indirect": 260, "induced": 190, "tax": 4500000, "retail": 110, "housing": 0.110}
+        "Large / Enterprise Mega-Scale Fulfillment / Logistics Hub": {"capex": 350, "const": 1000, "direct": 500, "indirect": 260, "induced": 190, "tax": 4500000, "retail": 110, "housing": 0.110},
+        
+        "Small / Community-Scale Bank / Financial Institution": {"capex": 2, "const": 8, "direct": 6, "indirect": 2, "induced": 3, "tax": 25000, "retail": 1, "housing": 0.005},
+        "Medium / Regional-Scale Bank / Financial Institution": {"capex": 10, "const": 30, "direct": 22, "indirect": 8, "induced": 10, "tax": 150000, "retail": 4, "housing": 0.020},
+        "Large / Enterprise Mega-Scale Bank / Financial Institution": {"capex": 75, "const": 250, "direct": 180, "indirect": 75, "induced": 90, "tax": 1200000, "retail": 25, "housing": 0.055},
+        
+        "Small / Community-Scale Childcare Facility": {"capex": 0.3, "const": 3, "direct": 8, "indirect": 2, "induced": 3, "tax": 8000, "retail": 2, "housing": 0.010},
+        "Medium / Regional-Scale Childcare Facility": {"capex": 2, "const": 15, "direct": 28, "indirect": 8, "induced": 12, "tax": 45000, "retail": 6, "housing": 0.025},
+        "Large / Enterprise Mega-Scale Childcare Facility": {"capex": 8, "const": 40, "direct": 85, "indirect": 25, "induced": 35, "tax": 180000, "retail": 18, "housing": 0.050}
     }
     
     tot_capex = 0
