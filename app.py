@@ -58,8 +58,6 @@ def load_census_data():
     
     tiger_url = "https://www2.census.gov/geo/tiger/TIGER2021/TRACT/tl_2021_42_tract.zip"
     gdf_tracts = gpd.read_file(tiger_url)
-    
-    # 🎯 Restored Geometry Fidelity (0.001)
     gdf_tracts['geometry'] = gdf_tracts['geometry'].simplify(tolerance=0.001, preserve_topology=True)
     
     gdf_mapped = gdf_tracts.merge(df_jobs, left_on='GEOID', right_on='trct', how='left')
@@ -130,7 +128,6 @@ def load_federal_boundaries(layer_type):
     if all_features:
         gdf = gpd.GeoDataFrame.from_features({"type": "FeatureCollection", "features": all_features}, crs="EPSG:4326")
         if not gdf.empty:
-            # 🎯 Restored Geometry Fidelity (0.001)
             gdf['geometry'] = gdf['geometry'].simplify(tolerance=0.001, preserve_topology=True)
             gdf['Designation'] = 'HUD Distressed Area (QCT)' if layer_type == "QCT" else 'Federal Opportunity Zone'
             return gdf
@@ -144,12 +141,10 @@ with st.spinner(f"Loading {selected_region} Data & Compiling Spatial Matrices...
         gdf_oz = load_federal_boundaries("OZ")
         gdf_permits = load_permit_data() if selected_region == "Pittsburgh" else gpd.GeoDataFrame()
         
-        # Smart OSM Loader: Try regional, if empty (Statewide View), load local buffered tract
         gdf_infra = load_osm_regional(region_query)
         if gdf_infra.empty and not gdf_mapped.empty:
             active_row = gdf_mapped[gdf_mapped['GEOID'] == st.session_state.selected_geoid]
             if not active_row.empty:
-                # Buffer the active tract by 500 meters to catch hospitals straddling the border
                 buffered_wkt = gpd.GeoSeries([active_row.geometry.iloc[0]], crs="EPSG:4326").to_crs(epsg=3857).buffer(500).to_crs(epsg=4326).iloc[0].wkt
                 gdf_infra = load_osm_tract(buffered_wkt)
     except Exception as e:
@@ -232,13 +227,14 @@ show_oz = st.sidebar.checkbox("Opportunity Zones (OZ) - Neon White", value=defau
 # --- MAP RENDERING ---
 try:
     m = folium.Map(location=region_coords, zoom_start=region_zoom, tiles="OpenStreetMap")
+    colormap = None
 
     if not filtered_tracts.empty:
         global_p5, global_p95 = np.percentile(gdf_mapped[metric_col].dropna(), [5, 95])
         vmin, vmax = min(global_p5, gdf_mapped[metric_col].min()), max(global_p95, gdf_mapped[metric_col].max())
         if vmin == vmax: vmax += 1
         colormap = cm.LinearColormap(colors=['#d73027', '#fee08b', '#1a9850'], vmin=vmin, vmax=vmax)
-        colormap.add_to(m)
+        colormap.caption = f'Net Growth: {base_metric} (Absolute Statewide Scale)'
 
         def style_job_base(feature):
             geoid = str(feature['properties'].get('GEOID'))
@@ -251,9 +247,16 @@ try:
             elif is_selected: return {'fillColor': '#9400D3', 'color': '#000000', 'weight': 3.5, 'fillOpacity': 0.85}
             else: return {'fillColor': colormap(feature['properties'][metric_col]) if feature['properties'][metric_col] is not None else 'transparent', 'color': '#333333', 'weight': 0.4, 'fillOpacity': 0.75}
 
-        folium.GeoJson(filtered_tracts, name='Job Creation Heatmap', style_function=style_job_base, tooltip=folium.features.GeoJsonTooltip(fields=['GEOID', 'job_growth', 'high_wage_growth', 'baseline_home_value', 'Investment_Rating'], aliases=['Tract:', 'Total Growth:', 'High-Wage Growth:', 'Est. Home Value:', 'Rating:'], style="background-color: white; color: #333333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(m)
+        # User-Friendly Layer Name 1
+        folium.GeoJson(
+            filtered_tracts, 
+            name='Job Creation Heatmap (Census LEHD Net Job Growth)', 
+            style_function=style_job_base, 
+            tooltip=folium.features.GeoJsonTooltip(fields=['GEOID', 'job_growth', 'high_wage_growth', 'baseline_home_value', 'Investment_Rating'], aliases=['Tract:', 'Total Growth:', 'High-Wage Growth:', 'Est. Home Value:', 'Rating:'], style="background-color: white; color: #333333; font-family: arial; font-size: 12px; padding: 10px;")
+        ).add_to(m)
 
-    sim_group = folium.FeatureGroup(name="Simulated Interventions")
+    # User-Friendly Layer Name 2
+    sim_group = folium.FeatureGroup(name="Simulated Interventions (Your Deployed Anchors)")
     for geoid, mods in st.session_state.tract_modifications.items():
         if mods:
             tract_geom = gdf_mapped[gdf_mapped['GEOID'].astype(str) == geoid]
@@ -262,13 +265,23 @@ try:
                 folium.Marker(location=[centroid.y, centroid.x], popup=f"Tract {geoid}: {', '.join(mods)}", icon=folium.Icon(color='green', icon='industry', prefix='fa')).add_to(sim_group)
     sim_group.add_to(m)
 
-    if show_permits and not gdf_permits.empty: HeatMap([[row.geometry.y, row.geometry.x, row['cost']] for idx, row in gdf_permits.iterrows()], radius=15, blur=10).add_to(m)
-    if show_high_opp and not gdf_high_opp.empty: folium.GeoJson(gdf_high_opp, style_function=lambda x: {'color': '#FFFF00', 'weight': 3.0, 'fillColor': '#FFFF00', 'fillOpacity': 0.3, 'dashArray': '2, 2'}).add_to(m)
-    if show_high_risk and not gdf_high_risk.empty: folium.GeoJson(gdf_high_risk, style_function=lambda x: {'color': '#FF0055', 'weight': 3.5, 'fillColor': '#FF0055', 'fillOpacity': 0.3, 'dashArray': '5, 3'}).add_to(m)
-    if show_qct and not gdf_qct.empty: folium.GeoJson(gdf_qct, style_function=lambda x: {'color': '#00FFFF', 'weight': 3.5, 'fillColor': '#00FFFF', 'fillOpacity': 0.25, 'dashArray': '4, 4'}).add_to(m)
-    if show_oz and not gdf_oz.empty: folium.GeoJson(gdf_oz, style_function=lambda x: {'color': '#FFFFFF', 'weight': 3.5, 'fillColor': '#FFFFFF', 'fillOpacity': 0.25}).add_to(m)
+    # User-Friendly Layer Name 3
+    if show_permits and not gdf_permits.empty: 
+        HeatMap([[row.geometry.y, row.geometry.x, row['cost']] for idx, row in gdf_permits.iterrows()], name="Capital Investment Density (Recent Commercial Permits)", radius=15, blur=10).add_to(m)
+        
+    # User-Friendly Layer Names 4 - 7
+    if show_high_opp and not gdf_high_opp.empty: folium.GeoJson(gdf_high_opp, name="High Opportunity Hubs (Top 25% Wage Growth Areas)", style_function=lambda x: {'color': '#FFFF00', 'weight': 3.0, 'fillColor': '#FFFF00', 'fillOpacity': 0.3, 'dashArray': '2, 2'}).add_to(m)
+    if show_high_risk and not gdf_high_risk.empty: folium.GeoJson(gdf_high_risk, name="High-Risk / Caution Zones (Declining Distressed Areas)", style_function=lambda x: {'color': '#FF0055', 'weight': 3.5, 'fillColor': '#FF0055', 'fillOpacity': 0.3, 'dashArray': '5, 3'}).add_to(m)
+    if show_qct and not gdf_qct.empty: folium.GeoJson(gdf_qct, name="HUD Qualified Census Tracts (Federal Low-Income Zones)", style_function=lambda x: {'color': '#00FFFF', 'weight': 3.5, 'fillColor': '#00FFFF', 'fillOpacity': 0.25, 'dashArray': '4, 4'}).add_to(m)
+    if show_oz and not gdf_oz.empty: folium.GeoJson(gdf_oz, name="Federal Opportunity Zones (Tax Deferment Eligible)", style_function=lambda x: {'color': '#FFFFFF', 'weight': 3.5, 'fillColor': '#FFFFFF', 'fillOpacity': 0.25}).add_to(m)
 
+    # Generate the Layer Control Checkbox FIRST...
     folium.LayerControl(collapsed=False).add_to(m)
+    
+    # ...And inject the Colormap Legend LAST so it doesn't show up as 'macro_element_div_4'
+    if colormap:
+        colormap.add_to(m)
+
     map_output = st_folium(m, use_container_width=True, returned_objects=['last_clicked'], height=500)
 
     if map_output and map_output.get('last_clicked'):
@@ -294,7 +307,6 @@ if not selected_row.empty:
     row_data = selected_row.iloc[0]
     base_j, base_val = row_data['C000_21'], row_data['baseline_home_value']
     
-    # EXACT TRACT-LEVEL INFRASTRUCTURE DETECTION (FAST & ACCURATE)
     detected_features = []
     if not gdf_infra.empty:
         active_geom = selected_row.geometry.iloc[0]
@@ -312,7 +324,6 @@ if not selected_row.empty:
     elif jg < 50: trend_word, trend_color = "Moderate Growth", "green"
     else: trend_word, trend_color = "Rapid Economic Expansion", "green"
 
-    # --- TRUE DYNAMIC SUITABILITY ENGINE (Reads Real OSM Data) ---
     has_med = any(x in detected_features for x in ['Hospital', 'Clinic', 'Dentist', 'Doctors', 'Pharmacy'])
     has_food = any(x in detected_features for x in ['Supermarket', 'Convenience', 'Mall'])
     has_edu = any(x in detected_features for x in ['University', 'College'])
