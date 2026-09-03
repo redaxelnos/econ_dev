@@ -4,67 +4,68 @@ import geopandas as gpd
 import osmnx as ox
 import folium
 import requests
-import io
 import numpy as np
 import branca.colormap as cm
 from shapely.geometry import Point
-from sklearn.neighbors import NearestNeighbors
-from folium.plugins import MarkerCluster, HeatMap
+from folium.plugins import HeatMap
 from streamlit_folium import st_folium
+
+# Prevent OpenStreetMap from hanging the cloud server
+ox.settings.timeout = 20
 
 st.set_page_config(page_title="PA Economic Gap Analysis", layout="wide")
 st.title("Pennsylvania Economic & Infrastructure Gap Analysis")
 
 # --- SESSION STATE INITIALIZATION ---
 if "selected_geoid" not in st.session_state:
-    st.session_state.selected_geoid = "42003010300"  # Default Pittsburgh sample tract
+    st.session_state.selected_geoid = "42003010300" 
 if "tract_modifications" not in st.session_state:
-    st.session_state.tract_modifications = {}  # Format: {geoid: [...]}
+    st.session_state.tract_modifications = {} 
 
-# --- REGION SELECTOR CONFIGURATION ---
 REGIONS = {
-    "Statewide View": {"coords": [40.9, -77.6], "zoom": 7},
-    "Pittsburgh": {"coords": [40.4406, -79.9959], "zoom": 12},
-    "Philadelphia": {"coords": [39.9526, -75.1652], "zoom": 12},
-    "Harrisburg": {"coords": [40.2732, -76.8867], "zoom": 13},
-    "Allentown": {"coords": [40.6023, -75.4714], "zoom": 13},
-    "Erie": {"coords": [42.1292, -80.0851], "zoom": 13},
-    "Scranton": {"coords": [41.4090, -75.6624], "zoom": 13},
-    "Lancaster": {"coords": [40.0379, -76.3055], "zoom": 13}
+    "Statewide View": {"coords": [40.9, -77.6], "zoom": 7, "query": None},
+    "Pittsburgh": {"coords": [40.4406, -79.9959], "zoom": 12, "query": "Allegheny County, Pennsylvania, USA"},
+    "Philadelphia": {"coords": [39.9526, -75.1652], "zoom": 12, "query": "Philadelphia County, Pennsylvania, USA"},
+    "Harrisburg": {"coords": [40.2732, -76.8867], "zoom": 13, "query": "Dauphin County, Pennsylvania, USA"},
+    "Allentown": {"coords": [40.6023, -75.4714], "zoom": 13, "query": "Lehigh County, Pennsylvania, USA"},
+    "Erie": {"coords": [42.1292, -80.0851], "zoom": 13, "query": "Erie County, Pennsylvania, USA"},
+    "Scranton": {"coords": [41.4090, -75.6624], "zoom": 13, "query": "Lackawanna County, Pennsylvania, USA"},
+    "Lancaster": {"coords": [40.0379, -76.3055], "zoom": 13, "query": "Lancaster County, Pennsylvania, USA"}
 }
 
 selected_region = st.sidebar.selectbox("Select Target Analysis Region", list(REGIONS.keys()))
 region_coords = REGIONS[selected_region]["coords"]
 region_zoom = REGIONS[selected_region]["zoom"]
+region_query = REGIONS[selected_region]["query"]
 
-# 1. Federal Data (Census LEHD Job Growth)
+# 1. Federal Data (Chunked Memory Optimization)
 @st.cache_data
 def load_census_data():
     base_url = "https://lehd.ces.census.gov/data/lodes/LODES8/pa"
-    cols = ['w_geocode', 'C000', 'CE03']
-    wac_21 = pd.read_csv(f"{base_url}/wac/pa_wac_S000_JT00_2021.csv.gz", usecols=cols)
-    wac_16 = pd.read_csv(f"{base_url}/wac/pa_wac_S000_JT00_2016.csv.gz", usecols=cols)
-    xwalk = pd.read_csv(f"{base_url}/pa_xwalk.csv.gz", usecols=['tabblk2020', 'trct'])
+    xwalk = pd.read_csv(f"{base_url}/pa_xwalk.csv.gz", usecols=['tabblk2020', 'trct'], dtype=str)
     
-    df_jobs = pd.merge(wac_21, wac_16, on='w_geocode', suffixes=('_21', '_16'), how='outer').fillna(0)
+    tract_21, tract_16 = pd.DataFrame(), pd.DataFrame()
+    for chunk in pd.read_csv(f"{base_url}/wac/pa_wac_S000_JT00_2021.csv.gz", usecols=['w_geocode', 'C000', 'CE03'], dtype={'w_geocode': str}, chunksize=50000):
+        tract_21 = pd.concat([tract_21, chunk.merge(xwalk, left_on='w_geocode', right_on='tabblk2020').groupby('trct')[['C000', 'CE03']].sum().reset_index()]).groupby('trct').sum().reset_index()
+        
+    for chunk in pd.read_csv(f"{base_url}/wac/pa_wac_S000_JT00_2016.csv.gz", usecols=['w_geocode', 'C000', 'CE03'], dtype={'w_geocode': str}, chunksize=50000):
+        tract_16 = pd.concat([tract_16, chunk.merge(xwalk, left_on='w_geocode', right_on='tabblk2020').groupby('trct')[['C000', 'CE03']].sum().reset_index()]).groupby('trct').sum().reset_index()
+    
+    del xwalk 
+    df_jobs = pd.merge(tract_21, tract_16, on='trct', suffixes=('_21', '_16'), how='outer').fillna(0)
     df_jobs['job_growth'] = df_jobs['C000_21'] - df_jobs['C000_16']
     df_jobs['high_wage_growth'] = df_jobs['CE03_21'] - df_jobs['CE03_16']
     
-    df_jobs = pd.merge(df_jobs, xwalk, left_on='w_geocode', right_on='tabblk2020')
-    tract_jobs = df_jobs.groupby('trct')[['job_growth', 'high_wage_growth', 'C000_21']].sum().reset_index()
-    tract_jobs['trct'] = tract_jobs['trct'].astype(str)
-    
     tiger_url = "https://www2.census.gov/geo/tiger/TIGER2021/TRACT/tl_2021_42_tract.zip"
     gdf_tracts = gpd.read_file(tiger_url)
-    gdf_mapped = gdf_tracts.merge(tract_jobs, left_on='GEOID', right_on='trct', how='left')
-    gdf_mapped['job_growth'] = gdf_mapped['job_growth'].fillna(0)
-    gdf_mapped['high_wage_growth'] = gdf_mapped['high_wage_growth'].fillna(0)
-    gdf_mapped['C000_21'] = gdf_mapped['C000_21'].fillna(0)
+    gdf_tracts['geometry'] = gdf_tracts['geometry'].simplify(tolerance=0.005, preserve_topology=True)
     
+    gdf_mapped = gdf_tracts.merge(df_jobs, left_on='GEOID', right_on='trct', how='left')
+    for col in ['job_growth', 'high_wage_growth', 'C000_21']: gdf_mapped[col] = gdf_mapped[col].fillna(0)
+        
     np.random.seed(42)
     gdf_mapped['baseline_home_value'] = 180000 + (gdf_mapped['high_wage_growth'] * 1200) + (gdf_mapped['C000_21'] * 45)
     gdf_mapped['baseline_home_value'] = gdf_mapped['baseline_home_value'].clip(lower=95000, upper=650000)
-    
     return gdf_mapped
 
 # 2. Capital Velocity Data
@@ -80,35 +81,40 @@ def load_permit_data():
         lat_col = 'latitude' if 'latitude' in df_permits.columns else 'y'
         lon_col = 'longitude' if 'longitude' in df_permits.columns else 'x'
         df_permits = df_permits.dropna(subset=[lat_col, lon_col])
-        gdf_permits = gpd.GeoDataFrame(df_permits, geometry=gpd.points_from_xy(df_permits[lon_col], df_permits[lat_col]), crs="EPSG:4326")
-        return gdf_permits[gdf_permits['cost'] > 0]
-    except Exception:
-        return gpd.GeoDataFrame()
+        return gpd.GeoDataFrame(df_permits, geometry=gpd.points_from_xy(df_permits[lon_col], df_permits[lat_col]), crs="EPSG:4326")[lambda x: x['cost'] > 0]
+    except: return gpd.GeoDataFrame()
 
-# 3. OSM Economic Anchor Data
+# 3. True Polygon OSM Loaders (No more centroids destroying data)
+osm_tags = {'amenity': ['bank', 'hospital', 'childcare', 'university', 'college', 'clinic', 'dentist', 'pharmacy'], 'shop': ['supermarket', 'mall', 'wholesale'], 'healthcare': ['hospital', 'clinic', 'center']}
+
 @st.cache_data
-def load_osm_data(city_name):
-    if city_name == "Statewide View": return gpd.GeoDataFrame()
-    tags = {'amenity': ['bank', 'hospital', 'childcare', 'university', 'college'], 'shop': ['supermarket'], 'public_transport': ['station']}
+def load_osm_regional(query_str):
+    if not query_str: return gpd.GeoDataFrame()
     try:
-        gdf_infra = ox.features_from_place(f"{city_name}, Pennsylvania, USA", tags=tags)
-        for col in ['amenity', 'shop', 'public_transport']:
-            if col not in gdf_infra.columns: gdf_infra[col] = pd.NA
-        gdf_points = gdf_infra.to_crs(epsg=3857)
-        gdf_points['geometry'] = gdf_points['geometry'].centroid
-        return gdf_points.to_crs(epsg=4326)
-    except Exception:
-        return gpd.GeoDataFrame()
+        gdf = ox.features_from_place(query_str, tags=osm_tags)
+        if not gdf.empty: return gdf.to_crs(epsg=4326)
+    except: pass
+    return gpd.GeoDataFrame()
 
-# 4 & 5. Federal Boundaries
+@st.cache_data
+def load_osm_tract(wkt_polygon):
+    from shapely import wkt
+    try:
+        gdf = ox.features_from_polygon(wkt.loads(wkt_polygon), tags=osm_tags)
+        if not gdf.empty: return gdf.to_crs(epsg=4326)
+    except: pass
+    return gpd.GeoDataFrame()
+
+# 4. Federal Boundaries
 @st.cache_data
 def load_federal_boundaries(layer_type):
     url = "https://services6.arcgis.com/zDzo4EZXf1AjkPjO/ArcGIS/rest/services/Qualified_Census_Tracts_2025/FeatureServer/0/query" if layer_type == "QCT" else "https://services.arcgis.com/VTyQ9soqVukalItT/arcgis/rest/services/Opportunity_Zones/FeatureServer/0/query"
     out_fields = "GEOID,TRACT,NAME" if layer_type == "QCT" else "TRACT,STATE_NAME"
+    where_clause = "GEOID LIKE '42%'" if layer_type == "QCT" else "TRACT LIKE '42%'"
     all_features = []
     offset = 0
-    while True:
-        params = {"where": "STATE='42' OR 1=1", "outFields": out_fields, "resultRecordCount": 1000, "resultOffset": offset, "f": "geojson"}
+    while offset < 4000:
+        params = {"where": where_clause, "outFields": out_fields, "resultRecordCount": 1000, "resultOffset": offset, "f": "geojson"}
         try:
             response = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
             if response.ok:
@@ -118,59 +124,45 @@ def load_federal_boundaries(layer_type):
                 if len(features) < 1000: break
                 offset += 1000
             else: break
-        except Exception: break
+        except: break
     if all_features:
         gdf = gpd.GeoDataFrame.from_features({"type": "FeatureCollection", "features": all_features}, crs="EPSG:4326")
-        if layer_type == "QCT":
-            gdf['Designation'], gdf['Strategic_Note'] = 'HUD Distressed Area (QCT)', 'Qualifies for LIHTC 30% basis boost & federal grants.'
-        else:
-            gdf['Designation'], gdf['Strategic_Note'] = 'Federal Opportunity Zone', 'Eligible for capital gains tax deferments & step-ups.'
-        return gdf
+        if not gdf.empty:
+            gdf['geometry'] = gdf['geometry'].simplify(tolerance=0.005, preserve_topology=True)
+            gdf['Designation'] = 'HUD Distressed Area (QCT)' if layer_type == "QCT" else 'Federal Opportunity Zone'
+            return gdf
     return gpd.GeoDataFrame()
 
 # --- INITIALIZE & LOAD DATA ---
-with st.spinner(f"Loading {selected_region} Data & Spatial Matrices..."):
+with st.spinner(f"Loading {selected_region} Data & Compiling Spatial Matrices..."):
     try:
         gdf_mapped = load_census_data()
         gdf_qct = load_federal_boundaries("QCT")
         gdf_oz = load_federal_boundaries("OZ")
-        gdf_infra = load_osm_data(selected_region)
         gdf_permits = load_permit_data() if selected_region == "Pittsburgh" else gpd.GeoDataFrame()
+        
+        # Smart OSM Loader: Try regional, if empty (Statewide View), load local buffered tract
+        gdf_infra = load_osm_regional(region_query)
+        if gdf_infra.empty and not gdf_mapped.empty:
+            active_row = gdf_mapped[gdf_mapped['GEOID'] == st.session_state.selected_geoid]
+            if not active_row.empty:
+                # Buffer the active tract by 500 meters to catch hospitals straddling the border
+                buffered_wkt = gpd.GeoSeries([active_row.geometry.iloc[0]], crs="EPSG:4326").to_crs(epsg=3857).buffer(500).to_crs(epsg=4326).iloc[0].wkt
+                gdf_infra = load_osm_tract(buffered_wkt)
     except Exception as e:
         st.error(f"Failed to load core data: {e}")
         st.stop()
 
-# --- SPATIAL INFRASTRUCTURE MATCHING ---
-def get_detected_features(region_name, infra_df, mapped_df):
-    tract_features = {}
-    if region_name == "Statewide View" or infra_df.empty or mapped_df.empty:
-        return tract_features
-    try:
-        infra_proj = infra_df.to_crs(mapped_df.crs)
-        joined = gpd.sjoin(infra_proj, mapped_df[['GEOID', 'geometry']], how='inner', predicate='within')
-        for geoid, group in joined.groupby('GEOID'):
-            amenities = [str(row.get('amenity') or row.get('shop') or row.get('public_transport')) for _, row in group.iterrows() if pd.notna(row.get('amenity') or row.get('shop') or row.get('public_transport'))]
-            tract_features[str(geoid)] = list(set(amenities))
-    except Exception:
-        pass
-    return tract_features
-
-tract_detected_features = get_detected_features(selected_region, gdf_infra, gdf_mapped)
-
-# --- DYNAMIC SPATIAL SPILLOVER HALO CALCULATION (Area/Density Proportional) ---
-halo_radius_m = 0
-base_radius_m = 0
-spillover_geoids = []
-zone_type = "Unknown"
-halo_radius_miles = 0
+# --- DYNAMIC SPATIAL SPILLOVER HALO CALCULATION ---
+halo_radius_m, base_radius_m, spillover_geoids, zone_type, halo_radius_miles = 0, 0, [], "Unknown", 0
 primary_geoid = st.session_state.selected_geoid
 active_mods = st.session_state.tract_modifications.get(primary_geoid, [])
 
 if active_mods:
     for anchor in active_mods:
-        if "Large" in anchor: base_radius_m = max(base_radius_m, 8046) # Base 5 miles
-        elif "Medium" in anchor: base_radius_m = max(base_radius_m, 3218) # Base 2 miles
-        elif "Small" in anchor: base_radius_m = max(base_radius_m, 1609) # Base 1 mile
+        if "Large" in anchor: base_radius_m = max(base_radius_m, 8046) 
+        elif "Medium" in anchor: base_radius_m = max(base_radius_m, 3218)
+        elif "Small" in anchor: base_radius_m = max(base_radius_m, 1609)
         
     if base_radius_m > 0 and not gdf_mapped.empty:
         try:
@@ -178,29 +170,18 @@ if active_mods:
             if not active_tract_geom.empty:
                 target_geom_3857 = active_tract_geom.to_crs(epsg=3857).geometry.iloc[0]
                 tract_area_sqkm = target_geom_3857.area / 1e6
-                
-                # Topographic Density Multiplier Logic
-                if tract_area_sqkm < 2.0:
-                    zone_type, multiplier = "Dense Urban", 0.70
-                elif tract_area_sqkm < 10.0:
-                    zone_type, multiplier = "Suburban", 1.0
-                elif tract_area_sqkm < 50.0:
-                    zone_type, multiplier = "Exurban / Rural", 2.0
-                else:
-                    zone_type, multiplier = "Deep Rural", 4.0
+                if tract_area_sqkm < 2.0: zone_type, multiplier = "Dense Urban", 0.70
+                elif tract_area_sqkm < 10.0: zone_type, multiplier = "Suburban", 1.0
+                elif tract_area_sqkm < 50.0: zone_type, multiplier = "Exurban / Rural", 2.0
+                else: zone_type, multiplier = "Deep Rural", 4.0
                 
                 halo_radius_m = base_radius_m * multiplier
                 halo_radius_miles = round(halo_radius_m / 1609.34, 1)
-                
-                buffer_3857 = gpd.GeoSeries([target_geom_3857], crs="EPSG:3857").buffer(halo_radius_m)
-                buffer_4326 = buffer_3857.to_crs(epsg=4326).iloc[0]
-                
-                spillover_mask = gdf_mapped.intersects(buffer_4326) & (gdf_mapped['GEOID'] != primary_geoid)
-                spillover_geoids = gdf_mapped[spillover_mask]['GEOID'].astype(str).tolist()
-        except Exception as e:
-            st.warning(f"Could not compute regional spillover halo: {e}")
+                buffer_4326 = gpd.GeoSeries([target_geom_3857], crs="EPSG:3857").buffer(halo_radius_m).to_crs(epsg=4326).iloc[0]
+                spillover_geoids = gdf_mapped[(gdf_mapped.intersects(buffer_4326)) & (gdf_mapped['GEOID'] != primary_geoid)]['GEOID'].astype(str).tolist()
+        except: pass
 
-# --- PRECISE DIAGNOSTIC EVALUATION ---
+# --- DIAGNOSTIC EVALUATION ---
 qct_ids = set(gdf_qct['GEOID'].astype(str)) if not gdf_qct.empty and 'GEOID' in gdf_qct.columns else set()
 oz_ids = set(gdf_oz['TRACT'].astype(str)) if not gdf_oz.empty and 'TRACT' in gdf_oz.columns else set()
 high_wage_threshold = np.percentile(gdf_mapped['high_wage_growth'].dropna(), 75)
@@ -208,57 +189,30 @@ high_wage_threshold = np.percentile(gdf_mapped['high_wage_growth'].dropna(), 75)
 def evaluate_investment_risk(row):
     geoid, growth, high_wage = str(row['GEOID']), row['job_growth'], row['high_wage_growth']
     is_distressed = (geoid in qct_ids) or (geoid in oz_ids) or any(geoid.endswith(t) for t in oz_ids)
-    job_str, hw_str = f"Net job change: {int(growth):+d}", f"High-Wage change: {int(high_wage):+d} (Threshold: +{int(high_wage_threshold)})"
-    
-    if growth <= -30: return f"⚠️ Severely Disadvantaged / Critical Contraction | {job_str} | {hw_str} (Severe Job Loss)."
-    elif is_distressed:
-        if growth < -10: return f"🔴 High-Risk / Caution (Distressed + Decline) | {job_str} | {hw_str}."
-        elif growth < 20: return f"🟡 Distressed / Stagnant (Needs Catalyst) | {job_str} | {hw_str}."
-        else: return f"🟢 Distressed / High-Growth Opportunity | {job_str} | {hw_str}."
-    else:
-        if high_wage >= high_wage_threshold and growth > 10: return f"🌟 High Opportunity Growth Hub | {job_str} | {hw_str} (Top-Tier Expansion)."
-        elif growth < -10: return f"⚠️ Declining Standard Tract | {job_str} | {hw_str} (Severe contraction outside distressed bounds)."
-        else: return f"⚪ Stable / Moderate Growth | {job_str} | {hw_str}."
+    job_str, hw_str = f"Net job change: {int(growth):+d}", f"High-Wage change: {int(high_wage):+d}"
+    if growth <= -30: return f"⚠️ Severely Disadvantaged | {job_str} | {hw_str}."
+    elif is_distressed: return f"🔴 High-Risk / Caution | {job_str} | {hw_str}." if growth < -10 else f"🟡 Distressed / Stagnant | {job_str} | {hw_str}." if growth < 20 else f"🟢 Distressed / High-Growth | {job_str} | {hw_str}."
+    else: return f"🌟 High Opportunity Hub | {job_str} | {hw_str}." if (high_wage >= high_wage_threshold and growth > 10) else f"⚠️ Declining Standard Tract | {job_str} | {hw_str}." if growth < -10 else f"⚪ Stable | {job_str} | {hw_str}."
 
 gdf_mapped['Investment_Rating'] = gdf_mapped.apply(evaluate_investment_risk, axis=1)
 
 gdf_high_opp = gdf_mapped[gdf_mapped['Investment_Rating'].str.contains("High Opportunity", na=False)].copy()
 gdf_high_risk = gdf_mapped[gdf_mapped['Investment_Rating'].str.contains("High-Risk", na=False)].copy()
-gdf_sev_disadv = gdf_mapped[gdf_mapped['Investment_Rating'].str.contains("Severely Disadvantaged", na=False)].copy()
 
-# --- SIDEBAR CONTROLS ---
+# --- SIDEBAR ---
 st.sidebar.markdown("---")
-st.sidebar.header("Analysis Focus Mode")
-analysis_mode = st.sidebar.radio(
-    "Select Map Objective",
-    [
-        "Full Spectrum View (All Tracts)", 
-        "⚠️ Severely Disadvantaged & High-Need Focus (Critical Intervention)",
-        "🚨 Turnaround & Intervention Target Focus (Declining/Distressed Only)",
-        "🌟 High-Growth Scaling Focus (Expansion Hubs Only)",
-        "🔮 Counterfactual Impact Simulation (What-If Modeling)"
-    ]
-)
+analysis_mode = st.sidebar.radio("Select Map Objective", ["Full Spectrum View (All Tracts)", "⚠️ Severely Disadvantaged Focus", "🚨 Turnaround Target Focus", "🌟 High-Growth Scaling Focus", "🔮 Counterfactual Simulation"])
 
-st.sidebar.markdown("---")
-st.sidebar.header("Economic Vitality Layers")
-with st.sidebar.expander("ℹ️ Understanding LEHD Data (WAC)", expanded=False):
-    st.markdown("""
-    - **LEHD (Longitudinal Employer-Household Dynamics):** Tracks jobs where people work, not where they live.
-    - **Total Job Growth (All Wages):** Net change in all jobs combined (2016-2021). 
-    - **High-Wage Job Growth (Exceeding $40k/yr):** Isolates jobs earning greater than $3,333/month (CE03 tier).
-    """)
+base_metric = st.sidebar.radio("Base Heatmap Metric", ["Total Job Growth (All Wages)", "High-Wage Job Growth (Exceeding $40k/yr)"])
+metric_col = 'job_growth' if "Total" in base_metric else 'high_wage_growth'
 
-base_metric = st.sidebar.radio("Base Heatmap Metric (LEHD)", ["Total Job Growth (All Wages)", "High-Wage Job Growth (Exceeding $40k/yr)"])
-metric_col = 'job_growth' if base_metric == "Total Job Growth (All Wages)" else 'high_wage_growth'
-
-if analysis_mode == "⚠️ Severely Disadvantaged & High-Need Focus (Critical Intervention)":
+if "Severely Disadvantaged" in analysis_mode:
     filtered_tracts = gdf_mapped[gdf_mapped['job_growth'] <= -30]
     default_high_opp, default_high_risk, default_qct, default_oz = False, True, True, True
-elif analysis_mode == "🚨 Turnaround & Intervention Target Focus (Declining/Distressed Only)":
+elif "Turnaround" in analysis_mode:
     filtered_tracts = gdf_mapped[(gdf_mapped[metric_col] < 20) & (gdf_mapped['Investment_Rating'].str.contains("High-Risk|Distressed", na=False))]
     default_high_opp, default_high_risk, default_qct, default_oz = False, True, True, True
-elif analysis_mode == "🌟 High-Growth Scaling Focus (Expansion Hubs Only)":
+elif "High-Growth" in analysis_mode:
     filtered_tracts = gdf_mapped[gdf_mapped['Investment_Rating'].str.contains("High Opportunity|High-Growth", na=False)]
     default_high_opp, default_high_risk, default_qct, default_oz = True, False, False, False
 else:
@@ -267,24 +221,12 @@ else:
     default_high_opp, default_high_risk, default_qct, default_oz = True, True, True, True
 
 show_permits = st.sidebar.checkbox("Overlay Capital Investment Heatmap (WPRDC)", value=True) if selected_region == "Pittsburgh" else False
-
-st.sidebar.markdown("---")
-st.sidebar.header("Policy & Opportunity Boundaries")
-with st.sidebar.expander("ℹ️ Complete Statutory & Algorithmic Makeup", expanded=False):
-    st.markdown("""
-    - **Severely Disadvantaged Zones (Crimson):** Tracts experiencing severe job hemorrhage (loss of 30+ jobs). Requires emergency structural intervention.
-    - **High Opportunity Hubs (Neon Yellow):** Non-distressed tracts where high-wage expansion exceeds the regional 75th percentile. Framed for private investment scaling.
-    - **High-Risk / Caution Zones (Neon Red):** Distressed tracts experiencing net job decline (less than -10 jobs). Flags structural headwinds where tax incentives alone historically fail.
-    - **HUD QCT (Neon Blue):** Statutory low-income tracts (50%+ households under 60% AMGI or 25%+ poverty). Unlocks LIHTC 30% basis boosts.
-    - **Opportunity Zones (Neon White):** Treasury-certified low-income communities designated for capital gains tax deferment benefits.
-    """)
-
 show_high_opp = st.sidebar.checkbox("High Opportunity Hubs - Neon Yellow", value=default_high_opp)
 show_high_risk = st.sidebar.checkbox("High-Risk / Caution Zones - Neon Red", value=default_high_risk)
 show_qct = st.sidebar.checkbox("Distressed Areas (HUD QCT) - Neon Blue", value=default_qct)
 show_oz = st.sidebar.checkbox("Opportunity Zones (OZ) - Neon White", value=default_oz)
 
-# --- SAFE MAP RENDERING WRAPPER ---
+# --- MAP RENDERING ---
 try:
     m = folium.Map(location=region_coords, zoom_start=region_zoom, tiles="OpenStreetMap")
 
@@ -292,9 +234,7 @@ try:
         global_p5, global_p95 = np.percentile(gdf_mapped[metric_col].dropna(), [5, 95])
         vmin, vmax = min(global_p5, gdf_mapped[metric_col].min()), max(global_p95, gdf_mapped[metric_col].max())
         if vmin == vmax: vmax += 1
-
         colormap = cm.LinearColormap(colors=['#d73027', '#fee08b', '#1a9850'], vmin=vmin, vmax=vmax)
-        colormap.caption = f'Net Growth: {base_metric} (Absolute Statewide Scale)'
         colormap.add_to(m)
 
         def style_job_base(feature):
@@ -306,34 +246,27 @@ try:
             if has_mod: return {'fillColor': '#00FF00', 'color': '#000000', 'weight': 3.5, 'fillOpacity': 0.85}
             elif is_halo: return {'fillColor': '#00BFFF', 'color': '#00BFFF', 'weight': 2.5, 'dashArray': '5, 5', 'fillOpacity': 0.45}
             elif is_selected: return {'fillColor': '#9400D3', 'color': '#000000', 'weight': 3.5, 'fillOpacity': 0.85}
-            else:
-                val = feature['properties'][metric_col]
-                return {'fillColor': colormap(val) if val is not None else 'transparent', 'color': '#333333', 'weight': 0.4, 'fillOpacity': 0.75}
+            else: return {'fillColor': colormap(feature['properties'][metric_col]) if feature['properties'][metric_col] is not None else 'transparent', 'color': '#333333', 'weight': 0.4, 'fillOpacity': 0.75}
 
-        folium.GeoJson(
-            filtered_tracts,
-            name='Job Creation Heatmap (LEHD)',
-            style_function=style_job_base,
-            tooltip=folium.features.GeoJsonTooltip(fields=['GEOID', 'job_growth', 'high_wage_growth', 'baseline_home_value', 'Investment_Rating'], aliases=['Census Tract ID:', 'Total Job Growth:', 'High-Wage Growth:', 'Est. Median Home Value:', 'Diagnostic Evaluation:'], localize=True, sticky=True, style="background-color: white; color: #333333; font-family: arial; font-size: 12px; padding: 10px; max-width: 280px; word-wrap: break-word; white-space: normal;")
-        ).add_to(m)
+        folium.GeoJson(filtered_tracts, name='Job Creation Heatmap', style_function=style_job_base, tooltip=folium.features.GeoJsonTooltip(fields=['GEOID', 'job_growth', 'high_wage_growth', 'baseline_home_value', 'Investment_Rating'], aliases=['Tract:', 'Total Growth:', 'High-Wage Growth:', 'Est. Home Value:', 'Rating:'], style="background-color: white; color: #333333; font-family: arial; font-size: 12px; padding: 10px;")).add_to(m)
 
-    sim_group = folium.FeatureGroup(name="Simulated Interventions (Deployments)")
+    sim_group = folium.FeatureGroup(name="Simulated Interventions")
     for geoid, mods in st.session_state.tract_modifications.items():
         if mods:
             tract_geom = gdf_mapped[gdf_mapped['GEOID'].astype(str) == geoid]
             if not tract_geom.empty:
                 centroid = tract_geom.geometry.centroid.iloc[0]
-                folium.Marker(location=[centroid.y, centroid.x], popup=f"Tract {geoid}: Modifications -> {', '.join(mods)}", icon=folium.Icon(color='green', icon='industry', prefix='fa')).add_to(sim_group)
+                folium.Marker(location=[centroid.y, centroid.x], popup=f"Tract {geoid}: {', '.join(mods)}", icon=folium.Icon(color='green', icon='industry', prefix='fa')).add_to(sim_group)
     sim_group.add_to(m)
 
-    if show_permits and not gdf_permits.empty: HeatMap([[row.geometry.y, row.geometry.x, row['cost']] for idx, row in gdf_permits.iterrows()], name="Capital Investment Density", radius=15, blur=10, max_zoom=1).add_to(m)
-    if show_high_opp and not gdf_high_opp.empty: folium.GeoJson(gdf_high_opp, name="High Opportunity Hubs", style_function=lambda x: {'color': '#FFFF00', 'weight': 3.0, 'fillColor': '#FFFF00', 'fillOpacity': 0.3, 'dashArray': '2, 2'}).add_to(m)
-    if show_high_risk and not gdf_high_risk.empty: folium.GeoJson(gdf_high_risk, name="High-Risk / Caution Zones", style_function=lambda x: {'color': '#FF0055', 'weight': 3.5, 'fillColor': '#FF0055', 'fillOpacity': 0.3, 'dashArray': '5, 3'}).add_to(m)
-    if show_qct and not gdf_qct.empty: folium.GeoJson(gdf_qct, name="HUD Qualified Census Tracts", style_function=lambda x: {'color': '#00FFFF', 'weight': 3.5, 'fillColor': '#00FFFF', 'fillOpacity': 0.25, 'dashArray': '4, 4'}).add_to(m)
-    if show_oz and not gdf_oz.empty: folium.GeoJson(gdf_oz, name="Federal Opportunity Zones", style_function=lambda x: {'color': '#FFFFFF', 'weight': 3.5, 'fillColor': '#FFFFFF', 'fillOpacity': 0.25}).add_to(m)
+    if show_permits and not gdf_permits.empty: HeatMap([[row.geometry.y, row.geometry.x, row['cost']] for idx, row in gdf_permits.iterrows()], radius=15, blur=10).add_to(m)
+    if show_high_opp and not gdf_high_opp.empty: folium.GeoJson(gdf_high_opp, style_function=lambda x: {'color': '#FFFF00', 'weight': 3.0, 'fillColor': '#FFFF00', 'fillOpacity': 0.3, 'dashArray': '2, 2'}).add_to(m)
+    if show_high_risk and not gdf_high_risk.empty: folium.GeoJson(gdf_high_risk, style_function=lambda x: {'color': '#FF0055', 'weight': 3.5, 'fillColor': '#FF0055', 'fillOpacity': 0.3, 'dashArray': '5, 3'}).add_to(m)
+    if show_qct and not gdf_qct.empty: folium.GeoJson(gdf_qct, style_function=lambda x: {'color': '#00FFFF', 'weight': 3.5, 'fillColor': '#00FFFF', 'fillOpacity': 0.25, 'dashArray': '4, 4'}).add_to(m)
+    if show_oz and not gdf_oz.empty: folium.GeoJson(gdf_oz, style_function=lambda x: {'color': '#FFFFFF', 'weight': 3.5, 'fillColor': '#FFFFFF', 'fillOpacity': 0.25}).add_to(m)
 
     folium.LayerControl(collapsed=False).add_to(m)
-    map_output = st_folium(m, use_container_width=True, returned_objects=['last_clicked'], height=600)
+    map_output = st_folium(m, use_container_width=True, returned_objects=['last_clicked'], height=500)
 
     if map_output and map_output.get('last_clicked'):
         click_lat, click_lng = map_output['last_clicked']['lat'], map_output['last_clicked']['lng']
@@ -343,24 +276,32 @@ try:
             if st.session_state.selected_geoid != clicked_geoid:
                 st.session_state.selected_geoid = clicked_geoid
                 st.rerun()
-
 except Exception as e:
     st.error(f"Map Rendering Error: {str(e)}")
 
 # ==========================================
-# --- INTERACTIVE TRACT INSPECTOR ---
+# --- TRACT INSPECTOR & I-O DASHBOARD ---
 # ==========================================
 st.markdown("---")
-st.markdown(f"### 📍 Interactive Tract Inspector & Feature Toggle Panel (Selected Tract: `{st.session_state.selected_geoid}`)")
+st.markdown(f"### 📍 Interactive Tract Inspector (Selected Tract: `{st.session_state.selected_geoid}`)")
 
 selected_row = gdf_mapped[gdf_mapped['GEOID'].astype(str) == st.session_state.selected_geoid]
 
 if not selected_row.empty:
     row_data = selected_row.iloc[0]
     base_j, base_val = row_data['C000_21'], row_data['baseline_home_value']
-    detected_features = tract_detected_features.get(st.session_state.selected_geoid, [])
     
-    # Establish Historical Narrative Based on Job Growth
+    # EXACT TRACT-LEVEL INFRASTRUCTURE DETECTION (FAST & ACCURATE)
+    detected_features = []
+    if not gdf_infra.empty:
+        active_geom = selected_row.geometry.iloc[0]
+        local_infra = gdf_infra[gdf_infra.intersects(active_geom)]
+        for _, row in local_infra.iterrows():
+            val = row.get('amenity') or row.get('healthcare') or row.get('shop')
+            if pd.notna(val):
+                detected_features.append(str(val).replace('_', ' ').title())
+    detected_features = list(set(detected_features))
+    
     jg = int(row_data['job_growth'])
     if jg <= -50: trend_word, trend_color = "Severe Historical Decline", "red"
     elif jg < 0: trend_word, trend_color = "Contracting Job Market", "orange"
@@ -368,43 +309,24 @@ if not selected_row.empty:
     elif jg < 50: trend_word, trend_color = "Moderate Growth", "green"
     else: trend_word, trend_color = "Rapid Economic Expansion", "green"
 
-    # --- SUITABILITY ENGINE ---
-    if base_j > 3000:
-        likely_anchor = "Medium / Regional-Scale Hospital or College"
-        dream_anchor = "Large / Enterprise Mega-Scale Tech Campus & Transit Hub"
-    elif base_j > 800:
-        likely_anchor = "Small / Community-Scale Grocery Store or BRT Expansion"
-        dream_anchor = "Large / Enterprise Mega-Scale Hospital"
-    else:
-        likely_anchor = "Small / Community-Scale Childcare Facility or EV Hub"
-        dream_anchor = "Medium / Regional-Scale Advanced Manufacturing"
+    if base_j > 3000: likely_anchor, dream_anchor = "Medium/Regional Hospital", "Mega-Scale Tech Campus & Transit Hub"
+    elif base_j > 800: likely_anchor, dream_anchor = "Community Grocery or BRT", "Mega-Scale Hospital"
+    else: likely_anchor, dream_anchor = "Childcare or EV Hub", "Regional Advanced Manufacturing"
 
     col_info, col_controls = st.columns([1, 1.2])
     
     with col_info:
-        st.markdown("#### 📋 Baseline Tract Diagnostics")
-        st.write(f"- **Census GEOID:** `{st.session_state.selected_geoid}`")
-        st.write(f"- **Baseline Workplace Jobs:** `{int(base_j):,}`")
-        st.write(f"- **Historical Job Growth (16-21):** `{jg:+d}` (:{trend_color}[{trend_word}])")
-        st.write(f"- **Est. Baseline Home Value:** `${int(base_val):,}`")
-        
+        st.markdown(f"- **Baseline Jobs:** `{int(base_j):,}`\n- **Job Growth (16-21):** `{jg:+d}` (:{trend_color}[{trend_word}])\n- **Est. Home Value:** `${int(base_val):,}`")
         st.markdown(f"**🔍 Existing Infrastructure Context (OSM):**")
         if detected_features:
-            for feat in detected_features:
-                st.markdown(f"- ✅ Detected: `{feat.title()}`")
-            st.caption(f"These existing anchors currently support the tract's {trend_word.lower()} baseline.")
+            for feat in detected_features: st.markdown(f"- ✅ Detected: `{feat}`")
         else:
             st.markdown("- *No major commercial anchors detected via OpenStreetMap in this specific block.*")
-            st.caption(f"The lack of localized economic infrastructure correlates directly with the tract's {trend_word.lower()} baseline.")
-            
-        st.markdown("#### 🤖 AI Site Suitability Assessment")
         st.success(f"**Highly Probable Fit:** {likely_anchor}")
         st.info(f"**Dream Catalyst Scenario:** {dream_anchor}")
 
     with col_controls:
-        st.markdown("#### 🛠️ Add / Subtract Features, Infrastructure & Transit")
         current_mods = st.session_state.tract_modifications.get(st.session_state.selected_geoid, [])
-        
         feature_options = [
             "Small / Community-Scale Hospital / Medical Center", "Medium / Regional-Scale Hospital / Medical Center", "Large / Enterprise Mega-Scale Hospital / Medical Center",
             "Small / Community-Scale Grocery Store / Supermarket", "Medium / Regional-Scale Grocery Store / Supermarket", "Large / Enterprise Mega-Scale Grocery Store / Supermarket",
@@ -414,16 +336,15 @@ if not selected_row.empty:
             "Small / Community-Scale Childcare Facility", "Medium / Regional-Scale Childcare Facility", "Large / Enterprise Mega-Scale Childcare Facility",
             "Small / Community-Scale Advanced Manufacturing", "Medium / Regional-Scale Advanced Manufacturing", "Large / Enterprise Mega-Scale Advanced Manufacturing",
             "Small / Community-Scale Tech / R&D Campus", "Medium / Regional-Scale Tech / R&D Campus", "Large / Enterprise Mega-Scale Tech / R&D Campus",
-            
             "Small / Community EV Charging & Micro-Grid Hub", "Medium / Regional Complete Streets & Pedestrianization", "Medium / Regional Bus Rapid Transit (BRT) Corridor",
             "Large / Enterprise Smart Freight Corridor", "Large / Enterprise High-Speed Rail & Transit Hub"
         ]
         
         with st.form(key=f"sim_form_{st.session_state.selected_geoid}"):
-            selected_adds = st.multiselect("Select Anchors to Deploy / Simulate:", options=feature_options, default=current_mods)
-            submit_col, clear_col = st.columns([1, 1])
-            run_sim = submit_col.form_submit_button("🚀 Load Simulation")
-            clear_sim = clear_col.form_submit_button("🗑️ Clear Tract")
+            selected_adds = st.multiselect("Select Anchors to Deploy:", options=feature_options, default=current_mods)
+            c1, c2 = st.columns([1, 1])
+            run_sim = c1.form_submit_button("🚀 Load Simulation")
+            clear_sim = c2.form_submit_button("🗑️ Clear Tract")
 
         if run_sim:
             st.session_state.tract_modifications[st.session_state.selected_geoid] = selected_adds
@@ -432,11 +353,9 @@ if not selected_row.empty:
             st.session_state.tract_modifications[st.session_state.selected_geoid] = []
             st.rerun()
 
-    # ==========================================
-    # --- DYNAMIC I-O IMPACT & TIME DILATION ---
-    # ==========================================
+    # --- I-O MATH ---
     st.markdown("---")
-    st.markdown("### 📊 Baseline & Projected Input-Output (I-O) Economic Impact")
+    st.markdown("### 📊 Projected Input-Output (I-O) Impact")
     
     io_matrix = {
         "Small / Community-Scale Hospital / Medical Center": {"capex": 15, "const": 45, "direct": 50, "indirect": 15, "induced": 20, "tax": 450000, "retail": 12, "housing": 0.025},
@@ -463,7 +382,6 @@ if not selected_row.empty:
         "Small / Community-Scale Tech / R&D Campus": {"capex": 12, "const": 35, "direct": 60, "indirect": 15, "induced": 45, "tax": 350000, "retail": 18, "housing": 0.040},
         "Medium / Regional-Scale Tech / R&D Campus": {"capex": 80, "const": 220, "direct": 300, "indirect": 80, "induced": 240, "tax": 1600000, "retail": 90, "housing": 0.110},
         "Large / Enterprise Mega-Scale Tech / R&D Campus": {"capex": 300, "const": 850, "direct": 950, "indirect": 260, "induced": 750, "tax": 5500000, "retail": 280, "housing": 0.210},
-        
         "Small / Community EV Charging & Micro-Grid Hub": {"capex": 5, "const": 15, "direct": 5, "indirect": 5, "induced": 5, "tax": 40000, "retail": 10, "housing": 0.015},
         "Medium / Regional Complete Streets & Pedestrianization": {"capex": 45, "const": 150, "direct": 20, "indirect": 15, "induced": 50, "tax": 800000, "retail": 350, "housing": 0.060}, 
         "Medium / Regional Bus Rapid Transit (BRT) Corridor": {"capex": 120, "const": 400, "direct": 150, "indirect": 60, "induced": 90, "tax": 1500000, "retail": 200, "housing": 0.080},
@@ -472,39 +390,25 @@ if not selected_row.empty:
     }
     
     tot_capex, tot_const, tot_direct, tot_indirect, tot_induced, tot_tax, tot_retail, tot_housing_pct = 0, 0, 0, 0, 0, 0, 0, 0.0
-    has_commercial = False
-    has_transit = False
-    max_build_years = 1 
-    
+    has_commercial, has_transit, max_build_years = False, False, 1 
     job_categories = set()
 
-    # Outlier & Feasibility Detection Engine
     if current_mods:
-        dream_flags = []
-        stretch_flags = []
-        plausible_flags = []
+        dream_flags, stretch_flags, plausible_flags = [], [], []
         
         for anchor_name in current_mods:
-            # Feasibility Check
             if ("Mega-Scale" in anchor_name or "High-Speed Rail" in anchor_name) and base_j < 1500: dream_flags.append(anchor_name)
             elif ("Regional" in anchor_name or "BRT" in anchor_name) and base_j < 500: stretch_flags.append(anchor_name)
             else: plausible_flags.append(anchor_name)
 
-            # DYNAMIC TIMELINE (Critical Path Detection)
-            if "Mega-Scale Hospital" in anchor_name or "High-Speed Rail" in anchor_name or "Mega-Scale College" in anchor_name or "Mega-Scale Advanced Manufacturing" in anchor_name or "Mega-Scale Tech" in anchor_name:
-                max_build_years = max(max_build_years, 5)
-            elif "Regional-Scale Hospital" in anchor_name or "Smart Freight Corridor" in anchor_name or "BRT" in anchor_name or "Large / Enterprise" in anchor_name:
-                max_build_years = max(max_build_years, 3)
-            elif "Medium / Regional" in anchor_name or "Small / Community-Scale Hospital" in anchor_name or "University" in anchor_name or "Manufacturing" in anchor_name:
-                max_build_years = max(max_build_years, 2)
-            else:
-                max_build_years = max(max_build_years, 1)
+            if "Mega-Scale Hospital" in anchor_name or "High-Speed Rail" in anchor_name or "Mega-Scale College" in anchor_name or "Mega-Scale Advanced Manufacturing" in anchor_name or "Mega-Scale Tech" in anchor_name: max_build_years = max(max_build_years, 5)
+            elif "Regional-Scale Hospital" in anchor_name or "Smart Freight Corridor" in anchor_name or "BRT" in anchor_name or "Large / Enterprise" in anchor_name: max_build_years = max(max_build_years, 3)
+            elif "Medium / Regional" in anchor_name or "Small / Community-Scale Hospital" in anchor_name or "University" in anchor_name or "Manufacturing" in anchor_name: max_build_years = max(max_build_years, 2)
 
             if anchor_name in io_matrix:
                 if "Transit" in anchor_name or "BRT" in anchor_name or "Complete Streets" in anchor_name or "Freight" in anchor_name: has_transit = True
                 elif "Campus" in anchor_name or "Hospital" in anchor_name or "Hub" in anchor_name: has_commercial = True
                 
-                # Assign Job Sectors based on Anchor
                 if "Hospital" in anchor_name: job_categories.update(["Clinical Healthcare", "Medical Admin", "Facilities Ops"])
                 elif "Grocery" in anchor_name: job_categories.update(["Retail Sales", "Inventory Mgt", "Customer Service"])
                 elif "College" in anchor_name: job_categories.update(["Higher Education", "Research", "Campus Admin"])
@@ -521,15 +425,15 @@ if not selected_row.empty:
                 tot_retail += d["retail"]; tot_housing_pct += d["housing"]
 
         st.markdown("#### 🎯 Deployment Feasibility Analysis")
-        if plausible_flags: st.success(f"**🟢 Plausible & Highly Likely (Strong, realistic fit for current tract baseline):** {', '.join(plausible_flags)}")
-        if stretch_flags: st.warning(f"**🟡 Stretch Goal (Requires aggressive tax incentives & municipal rezoning):** {', '.join(stretch_flags)}")
-        if dream_flags: st.error(f"**🟣 Dream Scenario (Extremely low probability without total capital overhaul):** {', '.join(dream_flags)}")
+        if plausible_flags: st.success(f"**🟢 Plausible Fit:** {', '.join(plausible_flags)}")
+        if stretch_flags: st.warning(f"**🟡 Stretch Goal:** {', '.join(stretch_flags)}")
+        if dream_flags: st.error(f"**🟣 Dream Scenario:** {', '.join(dream_flags)}")
     
     synergy_active = has_commercial and has_transit
     synergy_multiplier = 1.25 if synergy_active else 1.0
 
     if synergy_active:
-        st.success("🚆 **Transit-Oriented Development (TOD) Synergy Activated!** By combining commercial anchors with advanced transportation, the labor pool and foot traffic multiplier expands by 25%.")
+        st.success("🚆 **Transit-Oriented Development (TOD) Synergy Activated!** Labor pool expands by 25%.")
 
     tot_direct = int(tot_direct * synergy_multiplier)
     tot_indirect = int(tot_indirect * synergy_multiplier)
@@ -548,20 +452,17 @@ if not selected_row.empty:
     halo_total_jobs = halo_indirect + halo_induced + halo_retail
     halo_tax = tot_tax * 0.35 
     
-    t1, t2, t3 = st.tabs(["📍 Local Host Impact", "🌊 Regional Halo Impact", "⏳ Temporal Impact Horizon (Time Dilation)"])
+    t1, t2, t3 = st.tabs(["📍 Local Host Impact", "🌊 Regional Halo Impact", "⏳ Temporal Impact Horizon"])
     
     with t1:
         d1, d2, d3, d4 = st.columns(4)
-        d1.metric("Est. Capital Investment (CapEx)", f"${tot_capex:,}M")
-        d2.metric("Total Local Jobs (I-O)", f"{int(primary_proj_jobs):,}", delta=f"+{int(primary_jobs_created)} net local lift")
+        d1.metric("Est. Capital Investment", f"${tot_capex:,}M")
+        d2.metric("Total Local Jobs", f"{int(primary_proj_jobs):,}", delta=f"+{int(primary_jobs_created)} net local lift")
         d3.metric("Host Municipal Tax Lift", f"${tot_tax:,.0f}")
         d4.metric("Est. Host Median Home Value", f"${int(primary_proj_val):,}", delta=f"${int(primary_proj_val - base_val):+,} ({tot_housing_pct*100:+.1f}%)")
         
     with t2:
-        if current_mods:
-            st.info(f"Economic effects radiate to **{len(spillover_geoids)}** neighboring tracts. The model detected a **{zone_type}** topology, dynamically adjusting the trade area radius to **{halo_radius_miles} miles** to account for local density.")
-        else:
-            st.info("Deploy anchors to view regional spatial spillovers.")
+        if current_mods: st.info(f"The model detected a **{zone_type}** topology, dynamically adjusting the trade area radius to **{halo_radius_miles} miles**.")
         h1, h2, h3, h4 = st.columns(4)
         h1.metric("Spillover Job Creation", f"+{int(halo_total_jobs)} jobs")
         h2.metric("Halo Retail/Dining Lift", f"+{int(halo_retail)} service jobs")
@@ -569,31 +470,21 @@ if not selected_row.empty:
         h4.metric("Secondary Housing Bump", f"+{tot_housing_pct*100*0.35:.1f}% avg lift")
         
     with t3:
-        if not current_mods:
-            st.info("Deploy an anchor to generate a probabilistic Temporal Impact timeline.")
-        else:
-            st.markdown("Economic impacts do not materialize instantly. Below is the realistic, probabilistic realization timeframe broken down by job type based on the **Critical Path Development Timeline** of your selected anchors:")
-            c1, c2, c3 = st.columns(3)
-            
+        if current_mods:
             core_sectors = ", ".join(list(job_categories)[:6]) if job_categories else "Mixed Commercial Operations"
-
+            c1, c2, c3 = st.columns(3)
             with c1:
                 st.markdown(f"#### Phase 1: Years 0 - {max_build_years} (Development)")
                 st.markdown(f"- **Primary Workforce:** Heavy Civil construction, Trades (Steel, Electrical, Carpentry), Architecture & Engineering.")
                 st.markdown(f"- **Construction Jobs:** {tot_const:,} (Temporary Peak)")
                 st.markdown(f"- **CapEx Deployed:** ${tot_capex}M")
-                st.markdown("- **Operational Jobs:** 0")
-                st.markdown("- **Housing Impact:** Speculative bump (+1%)")
             with c2:
                 st.markdown(f"#### Phase 2: Years {max_build_years + 1} - {max_build_years + 3} (Ramp-Up)")
                 st.markdown(f"- **Emerging Sectors:** Initial facility hiring focusing on **{core_sectors}**.")
-                st.markdown(f"- **Direct Hiring:** {tot_direct:,} jobs (Initial Operations)")
+                st.markdown(f"- **Direct Hiring:** {tot_direct:,} jobs")
                 st.markdown(f"- **Tax Base:** 50% realization (${tot_tax * 0.5:,.0f})")
-                st.markdown(f"- **Halo Spillover:** Logistics & supply chains begin forming.")
-                st.markdown(f"- **Housing Impact:** Accelerated growth driven by incoming workforce.")
             with c3:
                 st.markdown(f"#### Phase 3: Years {max_build_years + 4}+ (Maturation)")
-                st.markdown(f"- **Dominant Sectors:** Stabilized **{core_sectors}**, supplemented by massive secondary retail, civic administration, and local services.")
-                st.markdown(f"- **Full Stabilization:** {int(primary_jobs_created + halo_total_jobs):,} total regional jobs.")
+                st.markdown(f"- **Dominant Sectors:** Stabilized **{core_sectors}**, supplemented by local services.")
+                st.markdown(f"- **Full Stabilization:** {int(primary_jobs_created + halo_total_jobs):,} total jobs.")
                 st.markdown(f"- **Full Tax Yield:** ${tot_tax + halo_tax:,.0f} annually.")
-                st.markdown(f"- **Agglomeration:** Surrounding retail & services fully matured.")
