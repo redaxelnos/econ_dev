@@ -84,7 +84,7 @@ def load_permit_data():
         return gpd.GeoDataFrame(df_permits, geometry=gpd.points_from_xy(df_permits[lon_col], df_permits[lat_col]), crs="EPSG:4326")[lambda x: x['cost'] > 0]
     except: return gpd.GeoDataFrame()
 
-# 3. True Polygon OSM Loaders (No more centroids destroying data)
+# 3. True Polygon OSM Loaders
 osm_tags = {'amenity': ['bank', 'hospital', 'childcare', 'university', 'college', 'clinic', 'dentist', 'pharmacy'], 'shop': ['supermarket', 'mall', 'wholesale'], 'healthcare': ['hospital', 'clinic', 'center']}
 
 @st.cache_data
@@ -146,7 +146,6 @@ with st.spinner(f"Loading {selected_region} Data & Compiling Spatial Matrices...
         if gdf_infra.empty and not gdf_mapped.empty:
             active_row = gdf_mapped[gdf_mapped['GEOID'] == st.session_state.selected_geoid]
             if not active_row.empty:
-                # Buffer the active tract by 500 meters to catch hospitals straddling the border
                 buffered_wkt = gpd.GeoSeries([active_row.geometry.iloc[0]], crs="EPSG:4326").to_crs(epsg=3857).buffer(500).to_crs(epsg=4326).iloc[0].wkt
                 gdf_infra = load_osm_tract(buffered_wkt)
     except Exception as e:
@@ -309,9 +308,23 @@ if not selected_row.empty:
     elif jg < 50: trend_word, trend_color = "Moderate Growth", "green"
     else: trend_word, trend_color = "Rapid Economic Expansion", "green"
 
-    if base_j > 3000: likely_anchor, dream_anchor = "Medium/Regional Hospital", "Mega-Scale Tech Campus & Transit Hub"
-    elif base_j > 800: likely_anchor, dream_anchor = "Community Grocery or BRT", "Mega-Scale Hospital"
-    else: likely_anchor, dream_anchor = "Childcare or EV Hub", "Regional Advanced Manufacturing"
+    # --- TRUE DYNAMIC SUITABILITY ENGINE (Reads Real OSM Data) ---
+    has_med = any(x in detected_features for x in ['Hospital', 'Clinic', 'Dentist', 'Doctors', 'Pharmacy'])
+    has_food = any(x in detected_features for x in ['Supermarket', 'Convenience', 'Mall'])
+    has_edu = any(x in detected_features for x in ['University', 'College'])
+    has_fin = any(x in detected_features for x in ['Bank'])
+
+    if base_j > 3000:
+        if has_med and not has_edu: likely_anchor, dream_anchor = "Medium / Regional-Scale College / University", "Large / Enterprise Mega-Scale Tech Campus"
+        elif has_edu and not has_med: likely_anchor, dream_anchor = "Medium / Regional Hospital", "Large / Enterprise Mega-Scale Advanced Manufacturing"
+        else: likely_anchor, dream_anchor = "Medium / Regional Bus Rapid Transit (BRT)", "Large / Enterprise Smart Freight Corridor"
+    elif base_j > 800:
+        if has_food and has_fin: likely_anchor, dream_anchor = "Small / Community-Scale Childcare Facility", "Medium / Regional Hospital"
+        elif has_food and not has_fin: likely_anchor, dream_anchor = "Small / Community-Scale Bank", "Medium / Regional-Scale Tech / R&D Campus"
+        else: likely_anchor, dream_anchor = "Small / Community-Scale Grocery Store", "Large / Enterprise Mega-Scale Hospital"
+    else:
+        if has_food: likely_anchor, dream_anchor = "Small / Community EV Charging Hub", "Medium / Regional-Scale Advanced Manufacturing"
+        else: likely_anchor, dream_anchor = "Small / Community-Scale Childcare", "Small / Community-Scale Bank"
 
     col_info, col_controls = st.columns([1, 1.2])
     
@@ -322,7 +335,7 @@ if not selected_row.empty:
             for feat in detected_features: st.markdown(f"- ✅ Detected: `{feat}`")
         else:
             st.markdown("- *No major commercial anchors detected via OpenStreetMap in this specific block.*")
-        st.success(f"**Highly Probable Fit:** {likely_anchor}")
+        st.success(f"**Highly Probable Fit (Based on OSM gaps):** {likely_anchor}")
         st.info(f"**Dream Catalyst Scenario:** {dream_anchor}")
 
     with col_controls:
