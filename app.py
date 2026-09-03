@@ -58,7 +58,9 @@ def load_census_data():
     
     tiger_url = "https://www2.census.gov/geo/tiger/TIGER2021/TRACT/tl_2021_42_tract.zip"
     gdf_tracts = gpd.read_file(tiger_url)
-    gdf_tracts['geometry'] = gdf_tracts['geometry'].simplify(tolerance=0.005, preserve_topology=True)
+    
+    # 🎯 Restored Geometry Fidelity (0.001)
+    gdf_tracts['geometry'] = gdf_tracts['geometry'].simplify(tolerance=0.001, preserve_topology=True)
     
     gdf_mapped = gdf_tracts.merge(df_jobs, left_on='GEOID', right_on='trct', how='left')
     for col in ['job_growth', 'high_wage_growth', 'C000_21']: gdf_mapped[col] = gdf_mapped[col].fillna(0)
@@ -128,7 +130,8 @@ def load_federal_boundaries(layer_type):
     if all_features:
         gdf = gpd.GeoDataFrame.from_features({"type": "FeatureCollection", "features": all_features}, crs="EPSG:4326")
         if not gdf.empty:
-            gdf['geometry'] = gdf['geometry'].simplify(tolerance=0.005, preserve_topology=True)
+            # 🎯 Restored Geometry Fidelity (0.001)
+            gdf['geometry'] = gdf['geometry'].simplify(tolerance=0.001, preserve_topology=True)
             gdf['Designation'] = 'HUD Distressed Area (QCT)' if layer_type == "QCT" else 'Federal Opportunity Zone'
             return gdf
     return gpd.GeoDataFrame()
@@ -146,6 +149,7 @@ with st.spinner(f"Loading {selected_region} Data & Compiling Spatial Matrices...
         if gdf_infra.empty and not gdf_mapped.empty:
             active_row = gdf_mapped[gdf_mapped['GEOID'] == st.session_state.selected_geoid]
             if not active_row.empty:
+                # Buffer the active tract by 500 meters to catch hospitals straddling the border
                 buffered_wkt = gpd.GeoSeries([active_row.geometry.iloc[0]], crs="EPSG:4326").to_crs(epsg=3857).buffer(500).to_crs(epsg=4326).iloc[0].wkt
                 gdf_infra = load_osm_tract(buffered_wkt)
     except Exception as e:
